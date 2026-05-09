@@ -77,7 +77,7 @@ impl CdpPage {
     }
 
     /// Send a CDP command and await the response.
-    async fn send_cdp(&self, method: &str, params: Value) -> Result<Value, CliError> {
+    async fn send_cdp_raw(&self, method: &str, params: Value) -> Result<Value, CliError> {
         let id = self.cmd_id.fetch_add(1, Ordering::SeqCst);
         let msg = json!({
             "id": id,
@@ -119,7 +119,7 @@ impl CdpPage {
     /// Evaluate JS via Runtime.evaluate.
     async fn evaluate_js(&self, expression: &str, await_promise: bool) -> Result<Value, CliError> {
         let result = self
-            .send_cdp(
+            .send_cdp_raw(
                 "Runtime.evaluate",
                 json!({
                     "expression": expression,
@@ -148,7 +148,7 @@ impl CdpPage {
 #[async_trait]
 impl IPage for CdpPage {
     async fn goto(&self, url: &str, _options: Option<GotoOptions>) -> Result<(), CliError> {
-        self.send_cdp("Page.navigate", json!({ "url": url }))
+        self.send_cdp_raw("Page.navigate", json!({ "url": url }))
             .await?;
         // Wait for load event
         tokio::time::sleep(Duration::from_millis(500)).await;
@@ -216,7 +216,7 @@ impl IPage for CdpPage {
 
     async fn cookies(&self, _options: Option<CookieOptions>) -> Result<Vec<Cookie>, CliError> {
         let result = self
-            .send_cdp("Network.getCookies", json!({}))
+            .send_cdp_raw("Network.getCookies", json!({}))
             .await?;
         let cookies_val = result.get("cookies").cloned().unwrap_or(json!([]));
         let cookies: Vec<Cookie> = serde_json::from_value(cookies_val).unwrap_or_default();
@@ -225,7 +225,7 @@ impl IPage for CdpPage {
 
     async fn set_cookies(&self, cookies: Vec<Cookie>) -> Result<(), CliError> {
         for cookie in &cookies {
-            self.send_cdp(
+            self.send_cdp_raw(
                 "Network.setCookie",
                 json!({
                     "name": cookie.name,
@@ -241,7 +241,7 @@ impl IPage for CdpPage {
 
     async fn screenshot(&self, _options: Option<ScreenshotOptions>) -> Result<Vec<u8>, CliError> {
         let result = self
-            .send_cdp("Page.captureScreenshot", json!({ "format": "png" }))
+            .send_cdp_raw("Page.captureScreenshot", json!({ "format": "png" }))
             .await?;
         if let Some(data) = result.get("data").and_then(|d| d.as_str()) {
             Ok(crate::page::base64_decode_simple(data))
@@ -266,7 +266,7 @@ impl IPage for CdpPage {
     }
 
     async fn tabs(&self) -> Result<Vec<TabInfo>, CliError> {
-        let result = self.send_cdp("Target.getTargets", json!({})).await?;
+        let result = self.send_cdp_raw("Target.getTargets", json!({})).await?;
         let targets = result
             .get("targetInfos")
             .cloned()
@@ -298,13 +298,13 @@ impl IPage for CdpPage {
     }
 
     async fn switch_tab(&self, tab_id: &str) -> Result<(), CliError> {
-        self.send_cdp("Target.activateTarget", json!({ "targetId": tab_id }))
+        self.send_cdp_raw("Target.activateTarget", json!({ "targetId": tab_id }))
             .await?;
         Ok(())
     }
 
     async fn close(&self) -> Result<(), CliError> {
-        self.send_cdp("Browser.close", json!({})).await.ok();
+        self.send_cdp_raw("Browser.close", json!({})).await.ok();
         Ok(())
     }
 
@@ -326,5 +326,10 @@ impl IPage for CdpPage {
         let val = self.evaluate_js(&js, false).await?;
         let reqs: Vec<NetworkRequest> = serde_json::from_value(val).unwrap_or_default();
         Ok(reqs)
+    }
+
+    /// hermesDr fork · expose raw CDP send to YAML pipeline (for Input.insertText / Input.dispatchKeyEvent).
+    async fn send_cdp(&self, method: &str, params: Value) -> Result<Value, CliError> {
+        self.send_cdp_raw(method, params).await
     }
 }

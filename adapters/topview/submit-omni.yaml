@@ -1,0 +1,136 @@
+# Topview Seedance 2.0 Omni Reference submit · uses existing ep01-character-bank board
+# v0 placeholder selectors · MUST be patched after T4 selector recon
+# License: Apache-2.0 (same as parent autocli repo)
+site: topview
+name: submit-omni
+description: Submit Seedance Omni Reference job from existing ep01-character-bank board · zero file upload · chip-binding @ImageN
+domain: www.topview.ai
+strategy: cookie
+browser: true
+
+args:
+  asset_names:
+    type: string
+    required: true
+    description: Comma-separated asset names already in ep01-character-bank board (e.g. emma-face,storyboard-S311-take2)
+  prompt:
+    type: string
+    required: true
+    description: Prose prompt body with @Image1...@ImageN tokens at chip insertion points · max 5000 chars
+  duration:
+    type: int
+    default: 4
+    description: Video duration in seconds (4/6/8/10)
+  output_name:
+    type: string
+    required: true
+    description: Output identifier (used to find result on board later)
+
+columns: [task_id, status, board_url, balance_before, balance_after]
+
+pipeline:
+  # Pre-flight: prompt length check (Topview hard limit 5000)
+  - evaluate: |
+      const promptText = ${{ args.prompt | json }};
+      if (promptText.length > 5000) {
+        throw new Error('PROMPT_TOO_LONG · ' + promptText.length + '/5000 chars · trim before submit');
+      }
+      return { preflight: 'ok', prompt_chars: promptText.length };
+
+  # Navigate to ep01-character-bank board (URL locked from Cowork S313)
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 4
+  - evaluate: |
+      if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+        throw new Error('CLOUDFLARE_BLOCKED · abort');
+      }
+      return { board_loaded: 'yes' };
+
+  # T4 PLACEHOLDER · click 全參考 SEEDANCE2 button (selector TBD after T4 recon)
+  - evaluate: |
+      // PLACEHOLDER · real selector from T4 recon
+      const buttons = Array.from(document.querySelectorAll('button'));
+      const omniBtn = buttons.find(b => (b.innerText || '').includes('全參考')) ||
+                       buttons.find(b => (b.innerText || '').includes('SEEDANCE'));
+      if (!omniBtn) throw new Error('OMNI_BUTTON_NOT_FOUND · T4 recon needed');
+      omniBtn.click();
+      return { panel_opened: 'yes' };
+  - wait: 2
+
+  # T4 PLACEHOLDER · select assets from board chooser (per Cowork D2 · zero drag-drop)
+  - evaluate: |
+      const names = ${{ args.asset_names | json }}.split(',').map(s => s.trim());
+      // PLACEHOLDER · real selectors after T4 recon:
+      //   1. Hover 匯入 box → click 看板 sub-icon → click 圖片
+      //   2. For each name in names: find image card by alt/title/data-name match · click
+      // For now · just dump asset count for Phase B verify
+      return { asset_names: names, slots_intended: names.length };
+  - wait: 1
+
+  # T4 PLACEHOLDER · set duration / aspect / resolution (default Relax mode)
+  - evaluate: |
+      // PLACEHOLDER · real selectors after T4 recon
+      // Default settings should already be: 16:9 · 480p · 4s · Relax mode
+      // Just verify Relax mode chip visible · NOT 快速生成
+      return { params_set: 'placeholder' };
+
+  # T4 PLACEHOLDER · inject prompt with chip-binding mechanic (per Cowork D1)
+  # CRITICAL · @ImageN must be live-typed not pasted · keyboard simulation needed
+  - evaluate: |
+      const promptText = ${{ args.prompt | json }};
+      const promptArea = document.querySelector('textarea');  // PLACEHOLDER selector
+      if (!promptArea) throw new Error('PROMPT_AREA_NOT_FOUND · T4 recon needed');
+      promptArea.focus();
+      // PLACEHOLDER: real implementation must split prompt at @ImageN markers ·
+      //   for each prose segment: execCommand('insertText', false, segment) ·
+      //   for each @ImageN: dispatch @ + ArrowDown×N + Enter keyboard events ·
+      //   This requires chrome.debugger Input.dispatchKeyEvent · NOT plain DOM events
+      // For v0 hello-world · we just paste raw text and see what happens
+      promptArea.value = promptText;
+      promptArea.dispatchEvent(new Event('input', { bubbles: true }));
+      return { prompt_injected: 'placeholder' };
+  - wait: 1
+
+  # T4 PLACEHOLDER · pre-submit cr balance snapshot
+  - evaluate: |
+      const allEls = Array.from(document.querySelectorAll('div, span'));
+      const balanceEl = allEls.find(d => /\d+\.\d+\s*Ultra/.test(d.innerText || ''));
+      const balanceBefore = balanceEl ? balanceEl.innerText.trim() : 'UNKNOWN';
+      return { balance_before: balanceBefore };
+
+  # T4 PLACEHOLDER · click 生成 button (NEVER 快速生成)
+  - evaluate: |
+      const buttons = Array.from(document.querySelectorAll('button'));
+      // CRITICAL · find 生成 button NOT containing 快速
+      const genBtn = buttons.find(b => {
+        const txt = (b.innerText || '').trim();
+        return txt === '生成' && !txt.includes('快速');
+      });
+      if (!genBtn) throw new Error('GENERATE_BTN_NOT_FOUND · T4 recon needed · do NOT fall back to 快速生成');
+      genBtn.click();
+      return { generate_clicked: 'yes' };
+  - wait: 3
+
+  # Verify queue card + cr balance unchanged
+  - evaluate: |
+      const allEls = Array.from(document.querySelectorAll('div, span'));
+      const balanceEl = allEls.find(d => /\d+\.\d+\s*Ultra/.test(d.innerText || ''));
+      const balanceAfter = balanceEl ? balanceEl.innerText.trim() : 'UNKNOWN';
+
+      // PLACEHOLDER · find queue card · capture task_id
+      const cards = document.querySelectorAll('[data-test=task-card], [class*=task-card], [class*=card]');
+      const newCard = cards[0];
+      const taskId = newCard?.getAttribute('data-task-id') || newCard?.getAttribute('data-id') || 'UNKNOWN';
+
+      return {
+        task_id: taskId,
+        status: 'queued',
+        board_url: window.location.href,
+        balance_after: balanceAfter
+      };
+  - map:
+      task_id: ${{ item.task_id }}
+      status: ${{ item.status }}
+      board_url: ${{ item.board_url }}
+      balance_before: ${{ item.balance_before }}
+      balance_after: ${{ item.balance_after }}

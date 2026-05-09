@@ -1,0 +1,18 @@
+site: topview
+name: cdp-isolate
+description: Minimal CDP test · just navigate + Page.captureScreenshot
+domain: www.topview.ai
+strategy: cookie
+browser: true
+args: {}
+columns: [field, value]
+pipeline:
+  - navigate: https://www.topview.ai
+  - wait: 3
+  - cdp:
+      method: Page.captureScreenshot
+      params:
+        format: png
+  - map:
+      field: result
+      value: cdp returned data

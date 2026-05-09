@@ -1,0 +1,117 @@
+# hermesDr fork smoke test · verify CdpStep can fire trusted keystrokes
+# Pipeline: navigate → 影片 panel → SEEDANCE2 → focus contenteditable → Input.insertText "hello @"
+# → check if Topview autocomplete dropdown appears (proof trusted keystroke worked)
+site: topview
+name: chip-test
+description: Smoke test CdpStep · trusted keystroke chip-binding verification
+domain: www.topview.ai
+strategy: cookie
+browser: true
+
+args: {}
+
+columns: [step, value, dropdowns]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # Combined panel-open · all in one evaluate to keep state coherent (per recon proven flow)
+  - evaluate: |
+      (async () => {
+        const mkPointerSeq = async (btn) => {
+          const r = btn.getBoundingClientRect();
+          const cx = r.left + r.width/2, cy = r.top + r.height/2;
+          const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+          // Hover sequence (CRITICAL · React listens for hover state before allowing click)
+          btn.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          btn.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          btn.dispatchEvent(mk('mouseover'));
+          btn.dispatchEvent(mk('mouseenter'));
+          await new Promise(r => setTimeout(r, 200));
+          // Click sequence
+          btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          btn.dispatchEvent(mk('mousedown'));
+          btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          btn.dispatchEvent(mk('mouseup'));
+          btn.dispatchEvent(mk('click'));
+          btn.click();
+        };
+
+        // STEP 1: 影片 sidebar (lazy-load needs 5500ms total per recon empirics)
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) throw new Error('VIDEO_BTN_NOT_FOUND');
+        await mkPointerSeq(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+
+        // STEP 2: SEEDANCE2
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const seedanceBtn = buttons.find(b => (b.innerText || '').includes('全參考')) ||
+                            buttons.find(b => (b.innerText || '').includes('SEEDANCE')) ||
+                            buttons.find(b => (b.innerText || '').includes('Seedance'));
+        if (!seedanceBtn) {
+          const sample = buttons.map(b => (b.innerText || '').trim().slice(0, 25)).filter(t => t).slice(0, 35).join(' | ');
+          throw new Error('SEEDANCE_BTN_NOT_FOUND · btnCount=' + buttons.length + ' · sample: ' + sample);
+        }
+        await mkPointerSeq(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+
+        // STEP 3: focus contenteditable
+        const editables = Array.from(document.querySelectorAll('[contenteditable=true], [contenteditable]'));
+        if (editables.length === 0) throw new Error('CONTENTEDITABLE_NOT_FOUND');
+        const target = editables[0];
+        target.focus();
+        const r2 = target.getBoundingClientRect();
+        const cx2 = r2.left + 20, cy2 = r2.top + 20;
+        const mk2 = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx2, clientY: cy2, button: 0 });
+        target.dispatchEvent(mk2('mousedown'));
+        target.dispatchEvent(mk2('mouseup'));
+        target.dispatchEvent(mk2('click'));
+        await new Promise(r => setTimeout(r, 500));
+        return {
+          focused: target === document.activeElement,
+          class: target.className.slice(0, 80),
+          editable_count: editables.length
+        };
+      })()
+
+  # ⭐ CRITICAL TEST · easier first · Page.captureScreenshot (returns data · easier debug)
+  - cdp:
+      method: Page.captureScreenshot
+      params:
+        format: png
+
+  - wait: 1500
+
+  # Verify: did the text get inserted? did autocomplete dropdown appear?
+  - evaluate: |
+      (async () => {
+        const editables = Array.from(document.querySelectorAll('[contenteditable=true], [contenteditable]'));
+        const target = editables[0];
+        const text = (target?.innerText || '').slice(0, 100);
+        // Look for autocomplete dropdown · common patterns
+        const dropdownSelectors = [
+          '[role=listbox]',
+          '[role=menu]',
+          '[class*="autocomplete"]',
+          '[class*="dropdown"]',
+          '[class*="suggest"]',
+          '[class*="mention"]',
+          '[data-state=open]'
+        ];
+        const dropdowns = [];
+        for (const sel of dropdownSelectors) {
+          const found = document.querySelectorAll(sel);
+          if (found.length > 0) {
+            dropdowns.push({ sel: sel, count: found.length });
+          }
+        }
+        return {
+          text: text,
+          dropdown_hits: JSON.stringify(dropdowns).slice(0, 200)
+        };
+      })()
+  - map:
+      step: contenteditable_after_cdp
+      value: ${{ item.text }}
+      dropdowns: ${{ item.dropdown_hits }}

@@ -238,6 +238,17 @@ impl IPage for DaemonPage {
         let reqs: Vec<NetworkRequest> = serde_json::from_value(val).unwrap_or_default();
         Ok(reqs)
     }
+
+    /// hermesDr fork · raw CDP passthrough via daemon → extension `cdp` action.
+    /// Used for trusted keyboard input (Input.insertText / Input.dispatchKeyEvent).
+    async fn send_cdp(&self, method: &str, params: Value) -> Result<Value, CliError> {
+        let cmd = self
+            .cmd("cdp")
+            .await
+            .with_cdp_method(method)
+            .with_cdp_params(params);
+        self.send(cmd).await
+    }
 }
 
 /// Simple base64 decoder (avoiding an extra dependency). Public for reuse by cdp module.

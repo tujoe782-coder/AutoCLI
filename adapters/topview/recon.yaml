@@ -1,0 +1,176 @@
+# Topview reconnaissance adapter v2 · navigate + click 影片 panel + dump Seedance UI inventory
+# License: Apache-2.0 (same as parent autocli repo)
+site: topview
+name: recon
+description: Recon Topview Seedance video panel DOM · click 影片 sidebar button → dump button/textarea/image inventory
+domain: www.topview.ai
+strategy: cookie
+browser: true
+
+args: {}
+
+columns: [field, value]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+  - evaluate: |
+      (async () => {
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+          return [{ field: 'STATUS', value: 'CLOUDFLARE_BLOCKED' }];
+        }
+
+        // STEP 1: click 影片 button in left sidebar via realistic pointer event sequence
+        const sidebarVideoBtn = Array.from(document.querySelectorAll('button')).find(b =>
+          (b.innerText || '').trim() === '影片'
+        );
+        if (!sidebarVideoBtn) {
+          return [{ field: 'STATUS', value: 'VIDEO_BTN_NOT_FOUND' }];
+        }
+        // React reactive UI · use full pointer event sequence
+        const rect = sidebarVideoBtn.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const mkEvt = (type, opts) => new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0, ...opts });
+        sidebarVideoBtn.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sidebarVideoBtn.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sidebarVideoBtn.dispatchEvent(mkEvt('mouseover'));
+        sidebarVideoBtn.dispatchEvent(mkEvt('mouseenter'));
+        await new Promise(r => setTimeout(r, 200));
+        sidebarVideoBtn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sidebarVideoBtn.dispatchEvent(mkEvt('mousedown'));
+        sidebarVideoBtn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+        sidebarVideoBtn.dispatchEvent(mkEvt('mouseup'));
+        sidebarVideoBtn.dispatchEvent(mkEvt('click'));
+        sidebarVideoBtn.click(); // belt + suspenders
+        await new Promise(r => setTimeout(r, 2500));
+
+        const out = [];
+        out.push({ field: 'STATUS', value: 'OK · video panel opened' });
+        out.push({ field: 'title', value: document.title });
+        out.push({ field: 'url', value: window.location.href });
+        out.push({ field: 'body_chars', value: String(document.body.innerText.length) });
+
+        // Look for 全能參考 / SEEDANCE2 / 全參考 button now
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const targets = ['全能參考', '全參考', 'SEEDANCE', 'Seedance', 'OmniReference', 'omni_reference', 'Veo', '文字轉影片', '圖片轉影片', '無限模式', 'Relax'];
+        for (const txt of targets) {
+          const found = buttons.filter(b => (b.innerText || '').includes(txt));
+          if (found.length > 0) {
+            out.push({ field: `btn[${txt}].count`, value: String(found.length) });
+            const sample = found[0];
+            out.push({ field: `btn[${txt}].class`, value: (sample.className || '').slice(0, 120) });
+          }
+        }
+
+        // STEP 2: dump ALL buttons after 影片 click (to find SEEDANCE tab)
+        const allBtnTexts = buttons.map((b, i) => {
+          const txt = (b.innerText || '').trim().slice(0, 30);
+          if (txt) return `[${i}]"${txt}"`;
+          return null;
+        }).filter(Boolean);
+        out.push({ field: 'all_buttons_v1', value: allBtnTexts.slice(0, 50).join(' / ') });
+
+        // Wait longer · maybe lazy-load SEEDANCE tab
+        await new Promise(r => setTimeout(r, 3000));
+
+        const buttonsLater = Array.from(document.querySelectorAll('button'));
+        const allBtnTextsLater = buttonsLater.map(b => (b.innerText || '').trim()).filter(t => t).map(t => t.slice(0, 30));
+        out.push({ field: 'all_buttons_v2', value: allBtnTextsLater.slice(0, 50).join(' / ') });
+
+        // STEP 3: now try click SEEDANCE tab if visible
+        const omniBtn = buttonsLater.find(b => (b.innerText || '').includes('全能參考')) ||
+                         buttonsLater.find(b => (b.innerText || '').includes('全參考')) ||
+                         buttonsLater.find(b => (b.innerText || '').includes('SEEDANCE')) ||
+                         buttonsLater.find(b => (b.innerText || '').includes('Seedance'));
+        if (omniBtn) {
+          // Realistic pointer event sequence on SEEDANCE button
+          const r2 = omniBtn.getBoundingClientRect();
+          const cx2 = r2.left + r2.width / 2;
+          const cy2 = r2.top + r2.height / 2;
+          const mk2 = (type, opts) => new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: cx2, clientY: cy2, button: 0, ...opts });
+          omniBtn.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx2, clientY: cy2 }));
+          omniBtn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx2, clientY: cy2 }));
+          omniBtn.dispatchEvent(mk2('mousedown'));
+          omniBtn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx2, clientY: cy2 }));
+          omniBtn.dispatchEvent(mk2('mouseup'));
+          omniBtn.dispatchEvent(mk2('click'));
+          omniBtn.click();
+          await new Promise(r => setTimeout(r, 3000));
+          out.push({ field: 'STEP3', value: 'omni panel clicked · text=' + (omniBtn.innerText || '').trim() });
+
+          // STEP 4: dump SEEDANCE2 panel state
+          const buttonsAfterSeedance = Array.from(document.querySelectorAll('button'));
+          const newBtns = buttonsAfterSeedance.map(b => (b.innerText || '').trim()).filter(t => t).map(t => t.slice(0, 30));
+          out.push({ field: 'STEP4_buttons', value: newBtns.slice(0, 60).join(' / ') });
+
+          const newTextareas = Array.from(document.querySelectorAll('textarea'));
+          out.push({ field: 'STEP4_textarea_count', value: String(newTextareas.length) });
+          newTextareas.slice(0, 5).forEach((ta, i) => {
+            out.push({ field: `STEP4_ta[${i}].placeholder`, value: (ta.placeholder || '').slice(0, 100) });
+          });
+
+          const newEditables = Array.from(document.querySelectorAll('[contenteditable=true], [contenteditable]'));
+          out.push({ field: 'STEP4_contenteditable_count', value: String(newEditables.length) });
+          newEditables.slice(0, 3).forEach((el, i) => {
+            out.push({ field: `STEP4_ce[${i}].class`, value: (el.className || '').slice(0, 100) });
+            out.push({ field: `STEP4_ce[${i}].text`, value: (el.innerText || '').slice(0, 60) });
+          });
+
+          const submitBtns = buttonsAfterSeedance.filter(b => (b.innerText || '').match(/生成|快速/));
+          out.push({ field: 'STEP4_submit_btns', value: submitBtns.map(b => (b.innerText || '').trim()).join(' / ') });
+
+          out.push({ field: 'STEP4_body_chars', value: String(document.body.innerText.length) });
+        } else {
+          out.push({ field: 'STEP3', value: 'OMNI_BTN_NOT_FOUND' });
+        }
+
+        // After omni panel open · dump details
+        const buttonsAfter = Array.from(document.querySelectorAll('button'));
+        out.push({ field: 'buttons.count_after', value: String(buttonsAfter.length) });
+
+        // Textareas (now should include Seedance prompt area)
+        const textareas = Array.from(document.querySelectorAll('textarea'));
+        out.push({ field: 'textareas.count', value: String(textareas.length) });
+        textareas.slice(0, 5).forEach((ta, i) => {
+          out.push({ field: `ta[${i}].placeholder`, value: (ta.placeholder || '').slice(0, 100) });
+          out.push({ field: `ta[${i}].class`, value: (ta.className || '').slice(0, 120) });
+        });
+
+        // contenteditable divs (Topview prompt may be a rich text editor not textarea)
+        const editables = Array.from(document.querySelectorAll('[contenteditable=true], [contenteditable]'));
+        out.push({ field: 'contenteditable.count', value: String(editables.length) });
+        editables.slice(0, 3).forEach((el, i) => {
+          out.push({ field: `ce[${i}].class`, value: (el.className || '').slice(0, 120) });
+          out.push({ field: `ce[${i}].textPreview`, value: (el.innerText || '').slice(0, 60) });
+        });
+
+        // Image cards / asset thumbnails (board chooser content)
+        const imgs = Array.from(document.querySelectorAll('img'));
+        out.push({ field: 'img.count_after', value: String(imgs.length) });
+        const imgsWithAlt = imgs.filter(im => im.alt);
+        out.push({ field: 'img.with_alt_count', value: String(imgsWithAlt.length) });
+        imgsWithAlt.slice(0, 8).forEach((im, i) => {
+          out.push({ field: `img[${i}].alt`, value: (im.alt || '').slice(0, 60) });
+        });
+
+        // STEP 3: 匯入 box / upload area inventory
+        const importableEls = Array.from(document.querySelectorAll('[class*="upload"], [class*="import"], [class*="dropzone"], [class*="ref"]'));
+        out.push({ field: 'import_zones.count', value: String(importableEls.length) });
+
+        // 看板 chooser sub-buttons
+        const boardChooserBtns = buttonsAfter.filter(b => {
+          const txt = (b.innerText || '').trim();
+          return txt === '看板' || txt === '圖片' || txt === '影片' || txt === '我的素材';
+        });
+        out.push({ field: 'chooser_subbtns', value: boardChooserBtns.map(b => (b.innerText || '').trim()).join(' | ') });
+
+        // Slot indicator (after asset selection · @Image1...@ImageN UI)
+        const slotEls = Array.from(document.querySelectorAll('[class*="slot"], [class*="Image"], [class*="image-input"]'));
+        out.push({ field: 'slot_candidates.count', value: String(slotEls.length) });
+
+        return out;
+      })()
+  - map:
+      field: ${{ item.field }}
+      value: ${{ item.value }}

@@ -609,6 +609,47 @@ impl StepHandler for CollectStep {
 }
 
 // ---------------------------------------------------------------------------
+// CdpStep (hermesDr fork) — passthrough raw CDP commands (Input.insertText, Input.dispatchKeyEvent)
+// ---------------------------------------------------------------------------
+
+pub struct CdpStep;
+
+#[async_trait]
+impl StepHandler for CdpStep {
+    fn name(&self) -> &'static str {
+        "cdp"
+    }
+
+    fn is_browser_step(&self) -> bool {
+        true
+    }
+
+    async fn execute(
+        &self,
+        page: Option<Arc<dyn IPage>>,
+        params: &Value,
+        _data: &Value,
+        _args: &HashMap<String, Value>,
+    ) -> Result<Value, CliError> {
+        let pg = require_page(&page)?;
+        let obj = params
+            .as_object()
+            .ok_or_else(|| CliError::pipeline("cdp: params must be an object with 'method' and optional 'params'"))?;
+        let method = obj
+            .get("method")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| CliError::pipeline("cdp: missing 'method' field (e.g. 'Input.insertText')"))?
+            .to_string();
+        let cdp_params = obj
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let result = pg.send_cdp(&method, cdp_params).await?;
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -623,6 +664,7 @@ pub fn register_browser_steps(registry: &mut StepRegistry) {
     registry.register(Arc::new(ScreenshotStep));
     registry.register(Arc::new(ScrollStep));
     registry.register(Arc::new(CollectStep));
+    registry.register(Arc::new(CdpStep));  // hermesDr fork
 }
 
 // ---------------------------------------------------------------------------

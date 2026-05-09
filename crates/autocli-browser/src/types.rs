@@ -15,6 +15,12 @@ pub struct DaemonCommand {
     pub tab_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// CDP method name for 'cdp' action (e.g. 'Input.insertText') · hermesDr fork
+    #[serde(skip_serializing_if = "Option::is_none", rename = "cdpMethod")]
+    pub cdp_method: Option<String>,
+    /// CDP method params for 'cdp' action · hermesDr fork
+    #[serde(skip_serializing_if = "Option::is_none", rename = "cdpParams")]
+    pub cdp_params: Option<Value>,
 }
 
 impl DaemonCommand {
@@ -27,6 +33,8 @@ impl DaemonCommand {
             workspace: None,
             tab_id: None,
             format: None,
+            cdp_method: None,
+            cdp_params: None,
         }
     }
 
@@ -52,6 +60,18 @@ impl DaemonCommand {
 
     pub fn with_format(mut self, format: impl Into<String>) -> Self {
         self.format = Some(format.into());
+        self
+    }
+
+    /// hermesDr fork: set CDP method for 'cdp' action.
+    pub fn with_cdp_method(mut self, method: impl Into<String>) -> Self {
+        self.cdp_method = Some(method.into());
+        self
+    }
+
+    /// hermesDr fork: set CDP params for 'cdp' action.
+    pub fn with_cdp_params(mut self, params: Value) -> Self {
+        self.cdp_params = Some(params);
         self
     }
 }

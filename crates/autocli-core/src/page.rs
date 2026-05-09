@@ -193,4 +193,13 @@ pub trait IPage: Send + Sync {
 
     /// Get network requests (captured)
     async fn get_network_requests(&self) -> Result<Vec<NetworkRequest>, CliError>;
+
+    /// Send a raw CDP command (hermesDr fork) · for trusted keyboard/mouse input via Input.insertText / Input.dispatchKeyEvent etc.
+    /// Default impl returns error · concrete impls (CdpPage, daemon Page) override.
+    async fn send_cdp(&self, method: &str, _params: Value) -> Result<Value, CliError> {
+        Err(CliError::pipeline(format!(
+            "send_cdp not supported on this IPage impl (method={})",
+            method
+        )))
+    }
 }

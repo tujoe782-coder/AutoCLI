@@ -1,0 +1,35 @@
+site: topview
+name: cdp-input-test
+description: Test trusted Input.insertText via new cdp step
+domain: www.topview.ai
+strategy: cookie
+browser: true
+args: {}
+columns: [field, value]
+pipeline:
+  # Open a known contenteditable page · use a simple test page like https://www.google.com (textarea)
+  - navigate: https://www.google.com
+  - wait: 3
+  # Focus the search textarea
+  - evaluate: |
+      (async () => {
+        const ta = document.querySelector('textarea[name=q]') || document.querySelector('input[name=q]');
+        if (!ta) return 'NO_INPUT';
+        ta.focus();
+        await new Promise(r => setTimeout(r, 500));
+        return { focused: true, tag: ta.tagName };
+      })()
+  # Trusted insertText via new CDP step
+  - cdp:
+      method: Input.insertText
+      params:
+        text: "hello from autocli cdp step"
+  - wait: 1
+  - evaluate: |
+      (async () => {
+        const ta = document.querySelector('textarea[name=q]') || document.querySelector('input[name=q]');
+        return { val: ta?.value || '', verify: ta?.value?.includes('hello from autocli') };
+      })()
+  - map:
+      field: result
+      value: ${{ item.val }}
