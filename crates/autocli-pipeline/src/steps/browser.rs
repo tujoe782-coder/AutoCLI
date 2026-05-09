@@ -628,8 +628,8 @@ impl StepHandler for CdpStep {
         &self,
         page: Option<Arc<dyn IPage>>,
         params: &Value,
-        _data: &Value,
-        _args: &HashMap<String, Value>,
+        data: &Value,
+        args: &HashMap<String, Value>,
     ) -> Result<Value, CliError> {
         let pg = require_page(&page)?;
         let obj = params
@@ -640,12 +640,48 @@ impl StepHandler for CdpStep {
             .and_then(|v| v.as_str())
             .ok_or_else(|| CliError::pipeline("cdp: missing 'method' field (e.g. 'Input.insertText')"))?
             .to_string();
-        let cdp_params = obj
+        let cdp_params_raw = obj
             .get("params")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        // Template-expand string values inside cdp_params (so x/y can be `${{ data.x }}` etc)
+        // After expansion, attempt numeric coercion (CDP expects ints for x/y/keyCode etc)
+        let ctx = default_ctx(data, args);
+        let cdp_params = render_value(&cdp_params_raw, &ctx)?;
         let result = pg.send_cdp(&method, cdp_params).await?;
         Ok(result)
+    }
+}
+
+// Recursively walk a Value, render templates in string values, and coerce
+// integer/float-looking strings back to numbers (CDP wire types require it).
+fn render_value(v: &Value, ctx: &TemplateContext) -> Result<Value, CliError> {
+    match v {
+        Value::String(s) => {
+            let rendered = render_template_str(s, ctx)?;
+            // render_template_str returns a Value (could be String or other);
+            // if it's a String, try numeric coercion
+            if let Some(rs) = rendered.as_str() {
+                if let Ok(n) = rs.parse::<i64>() { return Ok(serde_json::json!(n)); }
+                if let Ok(f) = rs.parse::<f64>() { return Ok(serde_json::json!(f)); }
+            }
+            Ok(rendered)
+        }
+        Value::Object(map) => {
+            let mut new_map = serde_json::Map::new();
+            for (k, val) in map {
+                new_map.insert(k.clone(), render_value(val, ctx)?);
+            }
+            Ok(Value::Object(new_map))
+        }
+        Value::Array(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for val in arr {
+                out.push(render_value(val, ctx)?);
+            }
+            Ok(Value::Array(out))
+        }
+        _ => Ok(v.clone()),
     }
 }
 
