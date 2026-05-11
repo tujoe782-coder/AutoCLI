@@ -1,0 +1,986 @@
+# Topview Seedance 2.0 Omni Reference · 1-chip PRIORITY submit (S319 v1.2 ship · resolution+duration feature ported from 2chip-priority)
+#
+# Derived from submit-omni-1chip.yaml (Relax) + inline chevron mode switch (verbatim coords from S317 chevron-recon):
+#   - Chevron BUTTON: (478, 721)
+#   - 點數模式 radio: (346, 549) → 生成 button changes to "生成 N"
+#   - 無限模式 radio: (346, 630) → 生成 button restores "生成 0"
+#
+# S319 patches (S318 2chip-priority pattern dup-patched):
+#   - gh#27 resolution + duration args + P1.6/P1.7/P1.8 (per-second cost matrix verify)
+#   - gh#28 abort guard pattern (L890/L902 fallback evaluates respect __omniAbortClickGuard)
+#   - gh#25 P4.2 mkPointerSeq → CDP single-fire submit (no double-click)
+#
+# Workflow (S319 priority variant):
+#   P0 args validate (resolution + duration enum · COST_PER_SEC matrix · output_name)
+#   P1 navigate + open panel
+#   P1.5 chevron click + 點數模式 click + verify "生成 N" (cost-dependent)
+#   P1.6 RESOLUTION set (DOM-direct mkPointerSeq dropdown · skip-if-correct)
+#   P1.7 DURATION set (DOM-direct mkPointerSeq dropdown · skip-if-correct)
+#   P1.8 COST verify (gen btn text matches COST_PER_SEC × duration)
+#   P2 SLOT 1 chooser flow → bind @Image1
+#   P3 prompt insertion + chip binding
+#   P4 pre-submit checks + CDP single-fire submit (abort guard 5-layer) + verify
+#
+# Cost matrix (cr/submit): 480P × 4s = 2 · 480P × 8s = 4 · 720P × 4s = 4 · etc.
+# Annual quota: 6000 cr/year (Ultra subscription · NO monthly reset)
+# Wall: ~5 min per priority submit
+#
+# License: Apache-2.0
+
+site: topview
+name: submit-omni-1chip-priority
+description: Topview Seedance 1-chip PRIORITY submit · 15 pt/submit · ~5min wall · prompt with single @Image1 · chevron mode switch inline
+domain: www.topview.ai
+strategy: cookie
+browser: true
+# S321 gh#34 · pipeline ~5min wall + chip binding · 1800s = 30min upper bound (預設 60s 不夠)
+timeoutSeconds: 1800
+
+args:
+  asset_idx:
+    type: int
+    required: true
+    description: Single 0-indexed asset position in ep01-character-bank board
+  prompt:
+    type: string
+    required: true
+    description: Prose with exactly one @Image1 marker · max 15000 chars
+  duration:
+    type: int
+    default: 4
+    description: 4 | 5 | 6 | 8 | 10 | 15 seconds (default 4 · S319 gh#27 full Topview range)
+  resolution:
+    type: string
+    default: "480p"
+    description: 480p | 720p | 1080p (default 480p · S319 gh#27 ship · per Sunny S318 lock NEVER 720P unless explicit)
+  output_name:
+    type: string
+    required: true
+    description: Output identifier (logged · downloaded mp4 filename hint)
+
+columns: [phase, status, detail]
+
+pipeline:
+  # ===========================================================================
+  # P1 · navigate + INIT (S317 fix · window state must init POST-navigate · pre-navigate state gets cleared)
+  # Merged P0 (args validate + window stash) + P1 (panel open) into single post-navigate evaluate
+  # ===========================================================================
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 4
+
+  - evaluate: |
+      (async () => {
+        // ============ INIT (post-navigate · window state initialized HERE) ============
+        window.__omniLog = [];
+        window.__omniAbort = false;
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+
+        // ============ args validate (formerly P0 · re-do post-navigate) ============
+        const asset_idx = ${{ args.asset_idx }};
+        const prompt = ${{ args.prompt | json }};
+        const output_name = ${{ args.output_name | json }};
+        const target_resolution = ${{ args.resolution | json }};
+        const target_duration = ${{ args.duration | json }};
+
+        // S319 gh#27 · resolution + duration enum validate
+        const valid_res = ['480p', '720p', '1080p'];
+        const valid_dur = [4, 5, 6, 8, 10, 15];
+        if (!valid_res.includes(String(target_resolution).toLowerCase())) {
+          log('P0', 'FAIL', `INVALID_RESOLUTION '${target_resolution}' · must be one of ${valid_res.join('|')}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        if (!valid_dur.includes(parseInt(target_duration))) {
+          log('P0', 'FAIL', `INVALID_DURATION ${target_duration} · must be one of ${valid_dur.join('|')}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+
+        // S319 gh#27 · cost matrix · per-second scaling (gh#29 Cowork verified S319 · 1080P=2.5 NOT 2.0)
+        const COST_PER_SEC = { '480p': 0.5, '720p': 1.0, '1080p': 2.5 };
+        const expected_cost = COST_PER_SEC[String(target_resolution).toLowerCase()] * parseInt(target_duration);
+        window.__omniTargetRes = String(target_resolution).toLowerCase();
+        window.__omniTargetDur = parseInt(target_duration);
+        window.__omniExpectedCost = expected_cost;
+
+        if (prompt.length > 15000) {
+          log('P0', 'FAIL', `PROMPT_TOO_LONG ${prompt.length}/15000`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        if (prompt.length > 5000) {
+          log('P0', 'INFO', `prompt ${prompt.length}c · exceeds webUI 5000 counter · expect yellow warning · submit proceeds`);
+        }
+        if (isNaN(asset_idx) || asset_idx < 0 || asset_idx > 20) {
+          log('P0', 'FAIL', `INVALID_IDX ${asset_idx}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+
+        const tokens = prompt.split(/(@Image\d+)/);
+        const chipsFound = new Set();
+        const segments = [];
+        for (const t of tokens) {
+          const m = t.match(/^@Image(\d+)$/);
+          if (m) { chipsFound.add(parseInt(m[1])); segments.push({ type: 'chip', n: parseInt(m[1]) }); }
+          else if (t) { segments.push({ type: 'prose', text: t }); }
+        }
+        if (!chipsFound.has(1) || chipsFound.size !== 1) {
+          log('P0', 'FAIL', `CHIPS_MISMATCH expected {1} got {${[...chipsFound].sort().join(',')}}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+
+        let prose0 = '', prose1 = '';
+        let phase = 0;
+        for (const seg of segments) {
+          if (seg.type === 'chip') { phase = 1; continue; }
+          if (phase === 0) prose0 += seg.text;
+          else prose1 += seg.text;
+        }
+
+        window.__omniIdx = asset_idx;
+        window.__omniProse0 = prose0;
+        window.__omniProse1 = prose1;
+        window.__omniOutputName = output_name;
+        window.__omniSlotBound = 0;
+
+        log('P0', 'OK', `idx=${asset_idx} prose0=${prose0.length}c prose1=${prose1.length}c output=${output_name} mode=PRIORITY res=${window.__omniTargetRes} dur=${window.__omniTargetDur}s expectedCost=${window.__omniExpectedCost}cr`);
+
+        // ============ Cloudflare check + panel open (formerly P1 body) ============
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+          log('P1.0', 'FAIL', 'CLOUDFLARE_BLOCKED');
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+
+        const mkPointerSeq = async (rawEl) => {
+          let el = rawEl;
+          if (el && el.tagName && el.tagName.toLowerCase() === 'svg' && el.parentElement) {
+            el = el.parentElement;
+          }
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+          el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseover'));
+          el.dispatchEvent(mk('mouseenter'));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mousedown'));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseup'));
+          el.dispatchEvent(mk('click'));
+          if (typeof el.click === 'function') el.click();
+        };
+        window.__omniClick = mkPointerSeq;
+
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1', 'FAIL', 'VIDEO_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok: false }; }
+        await mkPointerSeq(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1.1', 'OK', 'video panel opened');
+
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1.2', 'FAIL', 'SEEDANCE_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok: false }; }
+        await mkPointerSeq(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1.2', 'OK', 'SEEDANCE2 panel opened');
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P1.5 · CHEVRON CLICK → 點數模式 → verify "生成 15" (S317 priority switch · verbatim coords from chevron-recon)
+  # ===========================================================================
+
+  # P1.5.1 CDP click chevron BUTTON @ (478, 721) — opens mode popup
+  - evaluate: |
+      ({ x: 478, y: 721 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseMoved
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: none
+        buttons: 0
+        clickCount: 0
+
+  - evaluate: |
+      ({ x: 478, y: 721 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mousePressed
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: left
+        buttons: 1
+        clickCount: 1
+
+  - evaluate: |
+      ({ x: 478, y: 721 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseReleased
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: left
+        buttons: 0
+        clickCount: 1
+
+  - wait: 2
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        log('P1.5.1', 'OK', 'chevron CDP click dispatched at (478,721)');
+        return { ok: true };
+      })()
+
+  # P1.5.2 CDP click 點數模式 @ (346, 549) — selects priority mode
+  - evaluate: |
+      ({ x: 346, y: 549 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseMoved
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: none
+        buttons: 0
+        clickCount: 0
+
+  - evaluate: |
+      ({ x: 346, y: 549 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mousePressed
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: left
+        buttons: 1
+        clickCount: 1
+
+  - evaluate: |
+      ({ x: 346, y: 549 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseReleased
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: left
+        buttons: 0
+        clickCount: 1
+
+  - wait: 2
+
+  # P1.5.3 verify priority active · capture cost + gen btn coord (S319 cost-aware · not hardcoded "生成 15")
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          return /^生成/.test(txt) && !txt.includes('快速');
+        });
+        if (!generateBtn) {
+          log('P1.5.3', 'FAIL', 'GENERATE_BTN_NOT_FOUND post mode switch');
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const genText = (generateBtn.innerText || '').trim().replace(/\n/g, ' ');
+        const costMatch = genText.match(/^生成\s*(\d+(?:\.\d+)?)/);
+        const cost = costMatch ? parseFloat(costMatch[1]) : null;
+        if (!cost || cost <= 0) {
+          log('P1.5.3', 'FAIL', `gen btn='${genText}' (expected '生成 N' with N>0) · priority mode switch FAILED`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const gr = generateBtn.getBoundingClientRect();
+        window.__omniGenBtnX = Math.round(gr.left + gr.width / 2);
+        window.__omniGenBtnY = Math.round(gr.top + gr.height / 2);
+        window.__omniCost = cost;
+        window.__omniPriorityActive = true;
+        log('P1.5.3', 'OK', `priority active · gen='${genText}' cost=${cost} cr · genBtn=(${window.__omniGenBtnX},${window.__omniGenBtnY})`);
+        return { ok: true };
+      })()
+
+
+  # ===========================================================================
+  # ⬇️ S321 REORDER (per S320 gh#32 hypothesis A confirmed take6/take7):
+  #    P2 chooser bind MOVED BEFORE P1.6/P1.7 dropdown setting.
+  #    Dropdown popover residual state interferes with chooser binding;
+  #    binding slots first leaves UI in clean state for subsequent dropdowns.
+  # ===========================================================================
+  # ===========================================================================
+  # P2 · SLOT 1 chooser flow (asset_idx → @Image1)
+  # ===========================================================================
+
+  # P2.1 HOVER (128,287)
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseMoved
+        x: 128
+        y: 287
+        button: none
+        buttons: 0
+        clickCount: 0
+  - wait: 2
+
+  # P2.2 CLICK (117,315) sub-icon
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseMoved
+        x: 117
+        y: 315
+        button: none
+        buttons: 0
+        clickCount: 0
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mousePressed
+        x: 117
+        y: 315
+        button: left
+        buttons: 1
+        clickCount: 1
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseReleased
+        x: 117
+        y: 315
+        button: left
+        buttons: 0
+        clickCount: 1
+  - wait: 1
+
+  # P2.3 CLICK (137,220) 圖片
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseMoved
+        x: 137
+        y: 220
+        button: none
+        buttons: 0
+        clickCount: 0
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mousePressed
+        x: 137
+        y: 220
+        button: left
+        buttons: 1
+        clickCount: 1
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseReleased
+        x: 137
+        y: 220
+        button: left
+        buttons: 0
+        clickCount: 1
+  - wait: 2
+
+  # P2.4 Locate asset by idx
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P2.4', 'SKIP', 'aborted'); return { x: 977, y: 240, fail: true }; }
+
+        const idx = window.__omniIdx;
+        const assetImgs = Array.from(document.querySelectorAll('img')).filter(im => {
+          const r = im.getBoundingClientRect();
+          return r.width > 50 && r.height > 50 && r.top > 50 && r.top < window.innerHeight - 50
+              && (im.src || '').includes('Key-Pair-Id') && !(im.alt || '').match(/Loading|topview/i);
+        }).sort((a, b) => {
+          const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+          const rowA = Math.round(ra.top / 30), rowB = Math.round(rb.top / 30);
+          if (rowA !== rowB) return rowA - rowB;
+          return ra.left - rb.left;
+        });
+
+        if (assetImgs.length <= idx) {
+          log('P2.4', 'FAIL', `idx ${idx} OOR · only ${assetImgs.length}`);
+          window.__omniAbort = true;
+          return { x: 977, y: 240, fail: true };
+        }
+        const r = assetImgs[idx].getBoundingClientRect();
+        const x = Math.round(r.left + r.width / 2);
+        const y = Math.round(r.top + r.height / 2);
+        window.__omniS1X = x;
+        window.__omniS1Y = y;
+        log('P2.4', 'OK', `idx=${idx} of ${assetImgs.length} · coord=(${x},${y})`);
+        return { x, y };
+      })()
+
+  # P2.5 CLICK asset → bind @Image1
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P2.5', 'SKIP', 'aborted'); return { ok: false }; }
+        const idx = window.__omniIdx;
+        const assetImgs = Array.from(document.querySelectorAll('img')).filter(im => {
+          const r = im.getBoundingClientRect();
+          return r.width > 50 && r.height > 50 && r.top > 50 && r.top < window.innerHeight - 50
+              && (im.src || '').includes('Key-Pair-Id') && !(im.alt || '').match(/Loading|topview/i);
+        }).sort((a, b) => {
+          const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+          const rowA = Math.round(ra.top / 30), rowB = Math.round(rb.top / 30);
+          if (rowA !== rowB) return rowA - rowB;
+          return ra.left - rb.left;
+        });
+        if (assetImgs.length <= idx) {
+          log('P2.5', 'FAIL', `idx ${idx} OOR · only ${assetImgs.length}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const targetImg = assetImgs[idx];
+        await window.__omniClick(targetImg);
+        await new Promise(r => setTimeout(r, 4500));
+        log('P2.5', 'OK', `mkPointerSeq click on idx=${idx} (S320 gh#32 fix · 4.5s wait per Sunny: select happened, closed too fast)`);
+        return { ok: true };
+      })()
+  - wait: 2
+
+  # P2.6 verify slot 1 bound
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const slotIndicators = Array.from(document.querySelectorAll('div, span, button, img'))
+          .filter(el => /^@?Image\s*1$/i.test((el.innerText || '').trim()) && (el.innerText || '').trim().length < 12);
+        const panelSlotImgs = Array.from(document.querySelectorAll('img')).filter(im => {
+          const r = im.getBoundingClientRect();
+          return r.left < 510 && r.left > 50 && r.top > 200 && r.top < 500 && r.width > 30 && r.height > 30
+              && (im.src || '').includes('Key-Pair-Id');
+        });
+        const cancelBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '取消');
+        const ok = slotIndicators.length > 0 || panelSlotImgs.length > 0;
+        if (ok) window.__omniSlotBound = 1;
+        log('P2.6', ok ? 'OK' : 'WARN',
+          `slot1 indicators=${slotIndicators.length} panelImgs=${panelSlotImgs.length} chooserOpen=${!!cancelBtn}`);
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P1.6 · RESOLUTION set (S319 gh#27 ship · DOM-direct mkPointerSeq dropdown)
+  # ===========================================================================
+
+  # P1.6.A click resolution dropdown button (or skip if already correct)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.6.A', 'SKIP', 'aborted'); return { ok: false }; }
+
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const resBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          const r = b.getBoundingClientRect();
+          return /^(480p|720p|1080p)$/i.test(txt) && r.width > 100 && r.width < 300 && r.height > 20 && r.height < 50;
+        });
+        if (!resBtn) {
+          log('P1.6.A', 'FAIL', 'RESOLUTION_BTN_NOT_FOUND');
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const currentRes = (resBtn.innerText || '').trim().toLowerCase();
+        const targetRes = window.__omniTargetRes;
+        const r = resBtn.getBoundingClientRect();
+        window.__omniResBtnX = Math.round(r.left + r.width / 2);
+        window.__omniResBtnY = Math.round(r.top + r.height / 2);
+
+        if (currentRes === targetRes) {
+          window.__omniResSkipClick = true;
+          log('P1.6.A', 'OK', `already=${currentRes} target=${targetRes} · skipping dropdown`);
+          return { ok: true };
+        }
+        window.__omniResSkipClick = false;
+
+        await window.__omniClick(resBtn);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.6.A', 'OK', `current=${currentRes} target=${targetRes} · clicked btn · waited 1.5s for popup`);
+        return { ok: true };
+      })()
+
+  # P1.6.B locate + click target resolution option in popup
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort || window.__omniResSkipClick) {
+          log('P1.6.B', 'SKIP', window.__omniResSkipClick ? 'already correct' : 'aborted');
+          return { ok: false };
+        }
+        const targetRes = window.__omniTargetRes;
+        const targetResUpper = targetRes.toUpperCase();
+        const targetResNum = targetRes.replace(/p$/i, '');
+
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const candidates = allEls.filter(el => {
+          if (el.children.length > 0) return false;
+          const t = (el.innerText || '').trim();
+          if (!t) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 5 || r.height < 5 || r.width > 400 || r.height > 80) return false;
+          return t === targetRes || t === targetResUpper || t === targetResNum
+              || t.toLowerCase().startsWith(targetRes + ' ')
+              || t.toLowerCase().startsWith(targetRes + '(');
+        });
+        const opts = candidates.filter(el => {
+          const r = el.getBoundingClientRect();
+          const cx = Math.round(r.left + r.width / 2);
+          const cy = Math.round(r.top + r.height / 2);
+          return Math.abs(cx - window.__omniResBtnX) > 5 || Math.abs(cy - window.__omniResBtnY) > 5;
+        });
+
+        if (opts.length === 0) {
+          log('P1.6.B', 'FAIL', `RES_OPT_NOT_FOUND target=${targetRes} candidates=${candidates.length}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const opt = opts[0];
+        await window.__omniClick(opt);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.6.B', 'OK', `clicked target option ${opt.tagName} text='${(opt.innerText||'').trim()}'`);
+        return { ok: true };
+      })()
+
+  # P1.6.C verify resolution applied
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.6.C', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const resBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          const r = b.getBoundingClientRect();
+          return /^(480p|720p|1080p)$/i.test(txt) && r.width > 100 && r.width < 300 && r.height > 20 && r.height < 50;
+        });
+        const currentRes = resBtn ? (resBtn.innerText || '').trim().toLowerCase() : 'MISSING';
+        const targetRes = window.__omniTargetRes;
+        const ok = currentRes === targetRes;
+        log('P1.6.C', ok ? 'OK' : 'FAIL', `post-click resolution='${currentRes}' target='${targetRes}' match=${ok}`);
+        if (!ok) window.__omniAbort = true;
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P1.7 · DURATION set (S319 gh#27 ship · DOM-direct mkPointerSeq dropdown)
+  # ===========================================================================
+
+  # P1.7.A click duration dropdown button (or skip if already correct)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.7.A', 'SKIP', 'aborted'); return { ok: false }; }
+
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const durBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          const r = b.getBoundingClientRect();
+          return /^\d+s$/.test(txt) && r.width > 100 && r.width < 300 && r.height > 20 && r.height < 50;
+        });
+        if (!durBtn) {
+          log('P1.7.A', 'FAIL', 'DURATION_BTN_NOT_FOUND');
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const currentDurStr = (durBtn.innerText || '').trim();
+        const currentDur = parseInt(currentDurStr.replace('s', ''));
+        const targetDur = window.__omniTargetDur;
+        const r = durBtn.getBoundingClientRect();
+        window.__omniDurBtnX = Math.round(r.left + r.width / 2);
+        window.__omniDurBtnY = Math.round(r.top + r.height / 2);
+
+        if (currentDur === targetDur) {
+          window.__omniDurSkipClick = true;
+          log('P1.7.A', 'OK', `already=${currentDur}s target=${targetDur}s · skipping`);
+          return { ok: true };
+        }
+        window.__omniDurSkipClick = false;
+
+        await window.__omniClick(durBtn);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.7.A', 'OK', `current=${currentDur}s target=${targetDur}s · clicked btn · waited 1.5s`);
+        return { ok: true };
+      })()
+
+  # P1.7.B locate + click target duration option
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort || window.__omniDurSkipClick) {
+          log('P1.7.B', 'SKIP', window.__omniDurSkipClick ? 'already correct' : 'aborted');
+          return { ok: false };
+        }
+        const targetDurStr = `${window.__omniTargetDur}s`;
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const candidates = allEls.filter(el => {
+          const t = (el.innerText || '').trim();
+          if (t !== targetDurStr) return false;
+          if (el.children.length > 0) return false;
+          const r = el.getBoundingClientRect();
+          return r.width > 5 && r.height > 5 && r.width < 250 && r.height < 50;
+        });
+        const opts = candidates.filter(el => {
+          const r = el.getBoundingClientRect();
+          const cx = Math.round(r.left + r.width / 2);
+          const cy = Math.round(r.top + r.height / 2);
+          return Math.abs(cx - window.__omniDurBtnX) > 5 || Math.abs(cy - window.__omniDurBtnY) > 5;
+        });
+        if (opts.length === 0) {
+          log('P1.7.B', 'FAIL', `DUR_OPT_NOT_FOUND target=${targetDurStr} candidates=${candidates.length}`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const opt = opts[0];
+        await window.__omniClick(opt);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.7.B', 'OK', `clicked target option ${opt.tagName} text='${(opt.innerText||'').trim()}'`);
+        return { ok: true };
+      })()
+
+  # P1.7.C verify duration applied
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.7.C', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const durBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          const r = b.getBoundingClientRect();
+          return /^\d+s$/.test(txt) && r.width > 100 && r.width < 300 && r.height > 20 && r.height < 50;
+        });
+        const currentDur = durBtn ? parseInt((durBtn.innerText || '').trim().replace('s', '')) : null;
+        const targetDur = window.__omniTargetDur;
+        const ok = currentDur === targetDur;
+        log('P1.7.C', ok ? 'OK' : 'FAIL', `post-click duration='${currentDur}s' target='${targetDur}s' match=${ok}`);
+        if (!ok) window.__omniAbort = true;
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P1.8 · COST verify · gen btn text must match expected_cost from P0 matrix
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.8', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          return /^生成/.test(txt) && !txt.includes('快速');
+        });
+        if (!generateBtn) {
+          log('P1.8', 'FAIL', 'GENERATE_BTN_MISSING post resolution+duration set');
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const genText = (generateBtn.innerText || '').trim().replace(/\n/g, ' ');
+        const costMatch = genText.match(/^生成\s*(\d+(?:\.\d+)?)/);
+        const currentCost = costMatch ? parseFloat(costMatch[1]) : null;
+        const expectedCost = window.__omniExpectedCost;
+        // S319 Sunny lock · exact match (tolerance=0) · pre gh#29 was 0.01 · now matrix verified Cowork S319 → no slack needed
+        const ok = currentCost !== null && currentCost === expectedCost;
+        window.__omniCost = currentCost;
+        const gr = generateBtn.getBoundingClientRect();
+        window.__omniGenBtnX = Math.round(gr.left + gr.width / 2);
+        window.__omniGenBtnY = Math.round(gr.top + gr.height / 2);
+        log('P1.8', ok ? 'OK' : 'FAIL', `cost match · gen='${genText}' current=${currentCost} expected=${expectedCost} · res=${window.__omniTargetRes} dur=${window.__omniTargetDur}s · genBtn=(${window.__omniGenBtnX},${window.__omniGenBtnY})`);
+        if (!ok) {
+          window.__omniAbort = true;
+        }
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P3 · focus contenteditable + prose0 → @Image1 → prose1
+  # ===========================================================================
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.0', 'SKIP', 'aborted'); return { ok: false }; }
+
+        const editables = Array.from(document.querySelectorAll('[contenteditable=true], [contenteditable]'));
+        if (editables.length === 0) {
+          log('P3.0', 'FAIL', 'NO_CONTENTEDITABLE');
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        const target = editables[0];
+        const r = target.getBoundingClientRect();
+        const cx = r.left + 30, cy = r.top + 30;
+        const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+        target.dispatchEvent(mk('mousedown'));
+        target.dispatchEvent(mk('mouseup'));
+        target.dispatchEvent(mk('click'));
+        target.focus();
+        await new Promise(r => setTimeout(r, 400));
+
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        sel.addRange(range);
+        if (target.innerText && target.innerText.length > 0) {
+          document.execCommand('delete', false);
+          await new Promise(r => setTimeout(r, 200));
+        }
+
+        log('P3.0', 'OK', `focused=${target === document.activeElement} cleared=${target.innerText.length === 0}`);
+        return { ok: true };
+      })()
+
+  # P3.1 prose0 (S321 gh#33 fix · execCommand JS path · handles >5000c)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.1', 'SKIP', 'aborted'); return { ok: false }; }
+        const text = window.__omniProse0 || '';
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.1', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniAbort = true; return { ok: false }; }
+        editable.focus();
+        const range = document.createRange();
+        range.selectNodeContents(editable);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const okExec = document.execCommand('insertText', false, text);
+        await new Promise(r => setTimeout(r, 800));
+        const finalLen = (editable.innerText || '').length;
+        log('P3.1', okExec ? 'OK' : 'WARN', `execCommand=${okExec} prose0_len=${text.length} cumulative_editable_len=${finalLen}`);
+        return { ok: okExec };
+      })()
+  - wait: 1
+
+  # P3.2 type "@" for chip trigger
+  - cdp:
+      method: Input.insertText
+      params:
+        text: "@"
+  - wait: 1
+
+  # P3.3 verify @ dropdown open
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const dropdowns = Array.from(document.querySelectorAll('[data-state=open], [role=listbox], [role=menu], [class*="mention"], [class*="autocomplete"]'));
+        const visD = dropdowns.filter(d => { const r = d.getBoundingClientRect(); return r.width > 5 && r.height > 5; });
+        log('P3.3', visD.length > 0 ? 'OK' : 'WARN', `dropdowns=${visD.length}`);
+        return { ok: visD.length > 0 };
+      })()
+
+  # P3.4 Enter selects @Image1
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params:
+        type: rawKeyDown
+        key: Enter
+        code: Enter
+        windowsVirtualKeyCode: 13
+        nativeVirtualKeyCode: 13
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params:
+        type: keyUp
+        key: Enter
+        code: Enter
+        windowsVirtualKeyCode: 13
+        nativeVirtualKeyCode: 13
+  - wait: 1
+
+  # P3.5 prose1 (S321 gh#33 fix · execCommand JS path · handles >5000c)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.5', 'SKIP', 'aborted'); return { ok: false }; }
+        const text = window.__omniProse1 || '';
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.5', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniAbort = true; return { ok: false }; }
+        editable.focus();
+        const range = document.createRange();
+        range.selectNodeContents(editable);
+        range.collapse(false);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        const okExec = document.execCommand('insertText', false, text);
+        await new Promise(r => setTimeout(r, 800));
+        const finalLen = (editable.innerText || '').length;
+        log('P3.5', okExec ? 'OK' : 'WARN', `execCommand=${okExec} prose1_len=${text.length} cumulative_editable_len=${finalLen}`);
+        return { ok: okExec };
+      })()
+  - wait: 1
+
+  # P3.6 verify chip binding
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.6', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniChipOk = false; return { ok: false }; }
+
+        const text = (editable.innerText || '');
+        const chips = Array.from(editable.querySelectorAll('span, div, a, button')).filter(el => {
+          const cls = ((el.className || '') + '').toString();
+          const txt = (el.innerText || '').trim();
+          return (/mention|chip|tag|reference|asset-ref/i.test(cls) && txt.length < 30)
+              || /^@?Image\s*\d+$/.test(txt);
+        });
+        const literal1 = /@\s*Image\s*1/.test(text);
+        const chipOk = chips.length >= 1 || literal1;
+        window.__omniChipOk = chipOk;
+
+        log('P3.6', chipOk ? 'OK' : 'FAIL',
+          `text_len=${text.length} chips=${chips.length} literal=${literal1} preview='${text.slice(0,100).replace(/\n/g,'|')}'`);
+        return { ok: chipOk };
+      })()
+
+  # ===========================================================================
+  # P4 · pre-submit safety + click 生成 via CDP SINGLE-FIRE (gh#25 fix) + post-submit verify
+  # ===========================================================================
+
+  # P4.1 balance + gen btn re-stash · capture state vars for P4.2.pre
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        let balanceText = 'UNKNOWN';
+        // S320 gh#31 fix · Cowork DOM inspection: button[aria-label="Credits"] innerText = pure number
+        // "Ultra" lives in sibling avatar subtree (tier badge) · NOT in balance container
+        const creditsBtn = document.querySelector('button[aria-label="Credits"]');
+        if (creditsBtn) {
+          const raw = (creditsBtn.innerText || '').trim();
+          if (/^\d{1,5}(?:\.\d+)?$/.test(raw)) balanceText = raw + ' Ultra';
+        }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => {
+          const txt = (b.innerText || '').trim();
+          return /^生成/.test(txt) && !txt.includes('快速');
+        });
+        const fastBtn = buttons.find(b => (b.innerText || '').includes('快速生成'));
+        const generateText = generateBtn ? (generateBtn.innerText || '').trim().replace(/\n/g, ' ') : 'MISSING';
+        const costMatch = generateText.match(/^生成\s*(\d+(?:\.\d+)?)/);
+        const currentCost = costMatch ? parseFloat(costMatch[1]) : null;
+        const costStable = currentCost === window.__omniCost;
+        window.__omniGenBtnFound = !!generateBtn;
+        window.__omniIsPriority = currentCost && currentCost > 0;
+
+        if (generateBtn) {
+          const gr = generateBtn.getBoundingClientRect();
+          window.__omniGenBtnX = Math.round(gr.left + gr.width / 2);
+          window.__omniGenBtnY = Math.round(gr.top + gr.height / 2);
+        }
+
+        log('P4.1', generateBtn && currentCost > 0 ? 'OK' : 'WARN',
+          `balance='${balanceText}' gen='${generateText}' currentCost=${currentCost} expectedCost=${window.__omniCost} costStable=${costStable} fast=${fastBtn ? 'present' : 'absent'} genBtn=(${window.__omniGenBtnX},${window.__omniGenBtnY})`);
+        return { ok: true };
+      })()
+
+  # P4.2 click 生成 via CDP SINGLE-FIRE (gh#25 fix · replaces mkPointerSeq double-click)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+
+        // S319 gh#28 fix · set click-guard flag so L890/L902 fallback evaluates respect abort
+        if (window.__omniAbort) {
+          window.__omniAbortClickGuard = true;
+          log('P4.2.pre', 'ABORT', 'aborted upstream · click guard set (gh#28 fix)');
+          return { x: 0, y: 0, skip: true };
+        }
+        if (!window.__omniGenBtnFound) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'gen btn missing'); return { x: 0, y: 0, skip: true }; }
+        if (!window.__omniIsPriority) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', `NOT priority mode (cost=0 or missing) · refusing`); return { x: 0, y: 0, skip: true }; }
+        if (window.__omniChipOk === false) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'chip-binding FAILED · refusing'); return { x: 0, y: 0, skip: true }; }
+        if (window.__omniSlotBound !== 1) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', `only ${window.__omniSlotBound}/1 slot bound`); return { x: 0, y: 0, skip: true }; }
+        if (!window.__omniPriorityActive) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'priority not confirmed P1.5.3'); return { x: 0, y: 0, skip: true }; }
+
+        window.__omniAbortClickGuard = false;
+        log('P4.2.pre', 'OK', `pre-submit checks PASS · gen btn=(${window.__omniGenBtnX},${window.__omniGenBtnY}) cost=${window.__omniCost}`);
+        return { x: window.__omniGenBtnX, y: window.__omniGenBtnY };
+      })()
+
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseMoved
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: none
+        buttons: 0
+        clickCount: 0
+
+  # S319 gh#28 fix · fallback evaluates honor __omniAbortClickGuard · click goes to (0,0) when aborted
+  - evaluate: |
+      ({
+        x: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnX || 270),
+        y: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnY || 721)
+      })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mousePressed
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: left
+        buttons: 1
+        clickCount: 1
+
+  - evaluate: |
+      ({
+        x: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnX || 270),
+        y: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnY || 721)
+      })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params:
+        type: mouseReleased
+        x: ${{ data.x }}
+        y: ${{ data.y }}
+        button: left
+        buttons: 0
+        clickCount: 1
+
+  - wait: 5
+
+  # P4.3 post-submit verify
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        let balanceText = 'UNKNOWN';
+        // S320 gh#31 fix · Cowork DOM inspection: button[aria-label="Credits"] innerText = pure number
+        // "Ultra" lives in sibling avatar subtree (tier badge) · NOT in balance container
+        const creditsBtn = document.querySelector('button[aria-label="Credits"]');
+        if (creditsBtn) {
+          const raw = (creditsBtn.innerText || '').trim();
+          if (/^\d{1,5}(?:\.\d+)?$/.test(raw)) balanceText = raw + ' Ultra';
+        }
+        const allText = (document.body.innerText || '');
+        const queueHints = [];
+        if (/生成中|排隊|Queued|Generating|提交成功|任務|很抱歉/i.test(allText)) {
+          const els = Array.from(document.querySelectorAll('*')).filter(el => /生成中|排隊|提交成功|任務|很抱歉/i.test((el.innerText || '').trim()) && (el.innerText || '').length < 100 && el.children.length === 0);
+          queueHints.push(...els.slice(0, 3).map(el => (el.innerText || '').trim().slice(0, 60)));
+        }
+        log('P4.3', 'OK', `balance_after='${balanceText}' queueHints=[${queueHints.join('|')}] output_name=${window.__omniOutputName} expected_cost=${window.__omniCost}cr`);
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # FINAL · dump __omniLog
+  # ===========================================================================
+  - evaluate: |
+      (window.__omniLog || [{ phase: 'NONE', status: 'EMPTY', detail: 'log array missing' }])
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

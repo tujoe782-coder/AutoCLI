@@ -202,4 +202,24 @@ pub trait IPage: Send + Sync {
             method
         )))
     }
+
+    /// Programmatic file upload to a `<input type="file">` element · hermesDr fork (S321).
+    ///
+    /// Routes to the extension's blessed `setFileInputFiles` helper which calls
+    /// `DOM.enable` before the `getDocument` → `querySelector` → `setFileInputFiles`
+    /// chain. Avoids the silent no-op trap that hits the generic CDP passthrough
+    /// (CDP_ALLOWLIST does not include `DOM.enable`, so the DOM agent is not
+    /// initialized for raw passthrough callers and `setFileInputFiles` quietly fails).
+    ///
+    /// `selector` defaults to `input[type="file"]` if empty.
+    /// `files` must be ABSOLUTE paths reachable by the Chrome process.
+    async fn set_file_input(
+        &self,
+        _selector: &str,
+        _files: Vec<String>,
+    ) -> Result<(), CliError> {
+        Err(CliError::pipeline(
+            "set_file_input not supported on this IPage impl",
+        ))
+    }
 }

@@ -1,6 +1,6 @@
 use autocli_core::{CliCommand, CliError, IPage};
 use autocli_pipeline::{execute_pipeline, steps::register_all_steps, StepRegistry};
-use autocli_browser::BrowserBridge;
+use autocli_browser::{BrowserBridge, CdpPage};
 use serde_json::Value;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -55,9 +55,19 @@ async fn execute_command_inner(
     register_all_steps(&mut registry);
 
     if cmd.needs_browser() {
-        // Browser session
-        let mut bridge = BrowserBridge::new(daemon_port());
-        let page = bridge.connect().await?;
+        // Browser session — S321 gh#34: if AUTOCLI_CDP_ENDPOINT is set, attach
+        // directly via CDP WebSocket (bypassing the daemon + MV3 extension path).
+        // Used for `upload-asset` where chrome.debugger MV3 silently no-op's
+        // DOM.setFileInputFiles. Direct CDP attach (Puppeteer-style) has no such
+        // restriction. Requires Chrome launched with --remote-debugging-port
+        // and a non-default user-data-dir on Chrome 147+.
+        let page: Arc<dyn IPage> = if let Ok(endpoint) = std::env::var("AUTOCLI_CDP_ENDPOINT") {
+            tracing::info!(endpoint = %endpoint, "AUTOCLI_CDP_ENDPOINT set — using direct CDP attach (CdpPage)");
+            Arc::new(CdpPage::connect(&endpoint).await?)
+        } else {
+            let mut bridge = BrowserBridge::new(daemon_port());
+            bridge.connect().await?
+        };
 
         // Pre-navigate to domain if set, but ONLY if the pipeline doesn't
         // start with its own navigate step (to avoid double navigation).

@@ -686,6 +686,100 @@ fn render_value(v: &Value, ctx: &TemplateContext) -> Result<Value, CliError> {
 }
 
 // ---------------------------------------------------------------------------
+// UploadFileStep (hermesDr fork · S321) — programmatic file upload via the
+// extension's blessed `setFileInputFiles` helper. yaml usage:
+//
+//   - upload-file:
+//       selector: 'input[data-s321-target="1"]'   # optional · defaults to input[type="file"]
+//       files:
+//         - "${{ args.file_path }}"               # ABSOLUTE paths reachable by Chrome
+//
+// Why a dedicated step instead of `cdp: { method: DOM.setFileInputFiles }`:
+// the generic CDP passthrough does NOT call DOM.enable first (and DOM.enable is
+// not in the extension's CDP_ALLOWLIST), so the DOM agent stays uninitialized
+// and setFileInputFiles silently no-ops. The blessed extension helper handles
+// DOM.enable internally and shares state across the chain.
+// ---------------------------------------------------------------------------
+
+pub struct UploadFileStep;
+
+#[async_trait]
+impl StepHandler for UploadFileStep {
+    fn name(&self) -> &'static str {
+        "upload-file"
+    }
+
+    fn is_browser_step(&self) -> bool {
+        true
+    }
+
+    async fn execute(
+        &self,
+        page: Option<Arc<dyn IPage>>,
+        params: &Value,
+        data: &Value,
+        args: &HashMap<String, Value>,
+    ) -> Result<Value, CliError> {
+        let pg = require_page(&page)?;
+        let obj = params.as_object().ok_or_else(|| {
+            CliError::pipeline("upload-file: params must be an object with 'files' (and optional 'selector')")
+        })?;
+        let ctx = default_ctx(data, args);
+
+        let files_raw = obj
+            .get("files")
+            .ok_or_else(|| CliError::pipeline("upload-file: missing 'files' (array of paths)"))?;
+        let files_arr = files_raw
+            .as_array()
+            .ok_or_else(|| CliError::pipeline("upload-file: 'files' must be an array"))?;
+        if files_arr.is_empty() {
+            return Err(CliError::pipeline("upload-file: 'files' array is empty"));
+        }
+        let mut files: Vec<String> = Vec::with_capacity(files_arr.len());
+        for item in files_arr {
+            let raw_str = item.as_str().ok_or_else(|| {
+                CliError::pipeline("upload-file: each entry in 'files' must be a string path")
+            })?;
+            let rendered = render_template_str(raw_str, &ctx)?;
+            let s = rendered
+                .as_str()
+                .ok_or_else(|| {
+                    CliError::pipeline("upload-file: rendered file path is not a string")
+                })?
+                .to_string();
+            if s.is_empty() {
+                return Err(CliError::pipeline(
+                    "upload-file: rendered file path is empty",
+                ));
+            }
+            // CDP setFileInputFiles requires absolute paths that the Chrome process
+            // can read. Hard-error early on relative or `~`-prefixed paths so the
+            // user sees a clear failure rather than an extension-level silent fail.
+            if !s.starts_with('/') {
+                return Err(CliError::pipeline(format!(
+                    "upload-file: path must be absolute (starts with '/'), got: {s}"
+                )));
+            }
+            files.push(s);
+        }
+
+        let selector = if let Some(sel_raw) = obj.get("selector") {
+            let sel_str = sel_raw
+                .as_str()
+                .ok_or_else(|| CliError::pipeline("upload-file: 'selector' must be a string"))?;
+            let rendered = render_template_str(sel_str, &ctx)?;
+            rendered.as_str().unwrap_or("").to_string()
+        } else {
+            String::new()
+        };
+
+        pg.set_file_input(&selector, files).await?;
+        // Preserve `data` so subsequent steps that rely on a prior context aren't disrupted.
+        Ok(data.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -701,6 +795,7 @@ pub fn register_browser_steps(registry: &mut StepRegistry) {
     registry.register(Arc::new(ScrollStep));
     registry.register(Arc::new(CollectStep));
     registry.register(Arc::new(CdpStep));  // hermesDr fork
+    registry.register(Arc::new(UploadFileStep));  // hermesDr fork (S321)
 }
 
 // ---------------------------------------------------------------------------

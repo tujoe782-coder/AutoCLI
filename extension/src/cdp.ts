@@ -202,13 +202,24 @@ export async function screenshot(
 }
 
 /**
- * Set local file paths on a file input element via CDP DOM.setFileInputFiles.
- * This bypasses the need to send large base64 payloads through the message channel —
- * Chrome reads the files directly from the local filesystem.
+ * Set local file paths on a file input element via CDP — using the
+ * fileChooser-intercept pattern (S321 gh#34).
+ *
+ * Background: direct DOM.setFileInputFiles is silently no-op'd by Chrome when
+ * called from a chrome.debugger (MV3 extension) session UNLESS a file chooser
+ * dialog is in the "intercepted-open" state. This is a security measure to
+ * prevent extensions from injecting arbitrary files. The blessed pattern
+ * (Puppeteer/Playwright use it internally too):
+ *
+ *   1. Page.setInterceptFileChooserDialog enabled=true  (blocks native picker)
+ *   2. Subscribe to Page.fileChooserOpened              (we get backendNodeId)
+ *   3. Click the file input with userGesture            (triggers the chooser)
+ *   4. On event: DOM.setFileInputFiles({backendNodeId, files})
+ *   5. Page.setInterceptFileChooserDialog enabled=false (cleanup)
  *
  * @param tabId - Target tab ID
  * @param files - Array of absolute local file paths
- * @param selector - CSS selector to find the file input (optional, defaults to first file input)
+ * @param selector - CSS selector for the file input (optional, defaults to first file input)
  */
 export async function setFileInputFiles(
   tabId: number,
@@ -216,30 +227,97 @@ export async function setFileInputFiles(
   selector?: string,
 ): Promise<void> {
   await ensureAttached(tabId);
-
-  // Enable DOM domain (required for DOM.querySelector and DOM.setFileInputFiles)
-  await chrome.debugger.sendCommand({ tabId }, 'DOM.enable');
-
-  // Get the document root
-  const doc = await chrome.debugger.sendCommand({ tabId }, 'DOM.getDocument') as {
-    root: { nodeId: number };
-  };
-
-  // Find the file input element
   const query = selector || 'input[type="file"]';
-  const result = await chrome.debugger.sendCommand({ tabId }, 'DOM.querySelector', {
-    nodeId: doc.root.nodeId,
-    selector: query,
-  }) as { nodeId: number };
 
-  if (!result.nodeId) {
-    throw new Error(`No element found matching selector: ${query}`);
-  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
 
-  // Set files directly via CDP — Chrome reads from local filesystem
-  await chrome.debugger.sendCommand({ tabId }, 'DOM.setFileInputFiles', {
-    files,
-    nodeId: result.nodeId,
+    const cleanup = async (): Promise<void> => {
+      try { chrome.debugger.onEvent.removeListener(eventListener); } catch { /* ignore */ }
+      try {
+        await chrome.debugger.sendCommand(
+          { tabId },
+          'Page.setInterceptFileChooserDialog',
+          { enabled: false },
+        );
+      } catch { /* ignore */ }
+    };
+
+    const timer = setTimeout(async () => {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      reject(new Error(`Page.fileChooserOpened did not fire within 10s · selector=${query}`));
+    }, 10_000);
+
+    const eventListener = async (
+      source: chrome.debugger.Debuggee,
+      method: string,
+      params?: { backendNodeId?: number; mode?: string },
+    ): Promise<void> => {
+      if (settled) return;
+      if (!source || source.tabId !== tabId) return;
+      if (method !== 'Page.fileChooserOpened') return;
+      settled = true;
+      clearTimeout(timer);
+
+      const backendNodeId = params?.backendNodeId;
+      if (!backendNodeId) {
+        await cleanup();
+        reject(new Error('Page.fileChooserOpened missing backendNodeId'));
+        return;
+      }
+      try {
+        await chrome.debugger.sendCommand(
+          { tabId },
+          'DOM.setFileInputFiles',
+          { backendNodeId, files },
+        );
+        await cleanup();
+        resolve();
+      } catch (err) {
+        await cleanup();
+        reject(err);
+      }
+    };
+
+    void (async (): Promise<void> => {
+      chrome.debugger.onEvent.addListener(eventListener);
+      try {
+        await chrome.debugger.sendCommand(
+          { tabId },
+          'Page.setInterceptFileChooserDialog',
+          { enabled: true },
+        );
+        // Click the file input — file inputs open the picker when clicked,
+        // even synthetically, when userGesture is set on the Runtime.evaluate.
+        const expr =
+          `(() => { const i = document.querySelector(${JSON.stringify(query)}); ` +
+          `if (!i) throw new Error('no element matches selector: ' + ${JSON.stringify(query)}); ` +
+          `if (typeof (i as HTMLElement).click !== 'function') throw new Error('matched element has no click(): ' + (i as HTMLElement).tagName); ` +
+          `(i as HTMLElement).click(); return { ok: true }; })()`;
+        const evalResult = await chrome.debugger.sendCommand(
+          { tabId },
+          'Runtime.evaluate',
+          { expression: expr, userGesture: true, returnByValue: true, awaitPromise: false },
+        ) as { exceptionDetails?: { text?: string } };
+        if (evalResult?.exceptionDetails) {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          await cleanup();
+          reject(new Error(
+            `click failed: ${evalResult.exceptionDetails.text || JSON.stringify(evalResult.exceptionDetails)}`,
+          ));
+        }
+      } catch (err) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        await cleanup();
+        reject(err);
+      }
+    })();
   });
 }
 

@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::daemon_client::DaemonClient;
 use crate::dom_helpers;
-use crate::types::{DaemonCommand, ReadArticle};
+use crate::types::{DaemonCommand, FileBlob, ReadArticle};
 
 /// A page backed by the Daemon + Chrome Extension bridge.
 pub struct DaemonPage {
@@ -249,6 +249,113 @@ impl IPage for DaemonPage {
             .with_cdp_params(params);
         self.send(cmd).await
     }
+
+    /// hermesDr fork (S321 gh#34) · routes to extension's `setFileInputFiles` helper
+    /// via daemon `set-file-input` action — drag-drop pattern.
+    ///
+    /// Why drag-drop instead of CDP DOM.setFileInputFiles: Chromium 113+ silently
+    /// no-ops `DOM.setFileInputFiles` when called from chrome.debugger (MV3 extension),
+    /// even with chooser-intercept context + event-supplied backendNodeId. Confirmed
+    /// via runtime inspection (S321 diagnostic · post-call .files.length=0). So we
+    /// bypass the file chooser entirely:
+    ///
+    /// 1. Read each file's bytes here (Rust has full FS access)
+    /// 2. Base64-encode + guess MIME
+    /// 3. Send blobs through daemon → extension
+    /// 4. Extension does page-eval that reconstructs File objects, builds DataTransfer,
+    ///    and dispatches synthetic dragenter/dragover/drop on the selector element.
+    /// 5. Topview's React onDrop handler picks up dataTransfer.files → uploads to S3.
+    async fn set_file_input(
+        &self,
+        selector: &str,
+        files: Vec<String>,
+    ) -> Result<(), CliError> {
+        let mut blobs = Vec::with_capacity(files.len());
+        for path in &files {
+            let bytes = std::fs::read(path).map_err(|e| {
+                CliError::pipeline(format!(
+                    "set_file_input: failed to read {} : {}",
+                    path, e
+                ))
+            })?;
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("upload.bin")
+                .to_string();
+            let mime = guess_mime(path);
+            let b64 = base64_encode_simple(&bytes);
+            blobs.push(FileBlob { name, b64, mime });
+        }
+        let mut cmd = self
+            .cmd("set-file-input")
+            .await
+            .with_files(files)
+            .with_file_blobs(blobs);
+        if !selector.is_empty() {
+            cmd = cmd.with_selector(selector);
+        }
+        self.send(cmd).await?;
+        Ok(())
+    }
+}
+
+/// Guess MIME type from filename extension. Covers the formats Topview's upload accepts
+/// (.jpg/.jpeg/.png/.webp/.bmp/.mp4/.mov/.avi/.wav/.mp3) plus a generic fallback.
+fn guess_mime(path: &str) -> String {
+    let lower = path.to_lowercase();
+    let ext = lower.rsplit('.').next().unwrap_or("");
+    match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "txt" => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+/// Inline base64 encoder (no external crate). Standard alphabet, padded with '='.
+fn base64_encode_simple(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    let mut chunks = input.chunks_exact(3);
+    for c in &mut chunks {
+        let n = ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32);
+        out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+        out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+        out.push(TABLE[(n & 0x3F) as usize] as char);
+    }
+    let remainder = chunks.remainder();
+    match remainder.len() {
+        1 => {
+            let n = (remainder[0] as u32) << 16;
+            out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = ((remainder[0] as u32) << 16) | ((remainder[1] as u32) << 8);
+            out.push(TABLE[((n >> 18) & 0x3F) as usize] as char);
+            out.push(TABLE[((n >> 12) & 0x3F) as usize] as char);
+            out.push(TABLE[((n >> 6) & 0x3F) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
 }
 
 /// Simple base64 decoder (avoiding an extra dependency). Public for reuse by cdp module.

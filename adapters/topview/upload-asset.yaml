@@ -1,0 +1,164 @@
+# S321 upload-asset v9 · direct CDP attach (gh#34)
+#
+# v9 root-cause fix (vs v6/v7/v8):
+#   v6 (DOM.enable + chain), v7 (chooser-intercept + setFileInputFiles), v8
+#   (drag-drop via DataTransfer + CDP Input.dispatchDragEvent) ALL failed because:
+#     - Chromium 113+ silently no-op's DOM.setFileInputFiles from MV3 extension
+#       chrome.debugger session (any context, any nodeId, any pattern). Confirmed
+#       via post-call DOM.resolveNode + Runtime.callFunctionOn diagnostic.
+#     - JS-synthetic drag/drop events have isTrusted=false; Topview's onDrop
+#       rejects them.
+#     - CDP Input.dispatchDragEvent DOES produce isTrusted=true events at the
+#       匯入 box coords (verified via window-level sniffer, trustedCount > 0)
+#       BUT Topview's onDrop still didn't fire — drop zone isn't where we think.
+#
+#   v9 bypasses MV3 entirely. Sunny launches a second Chrome with:
+#     --remote-debugging-port=9222 --user-data-dir=$HOME/.chrome-cdp-s321
+#   (fresh profile — required because Chrome 147 silently disables debug port
+#   on default profile). AutoCLI execution.rs (S321 patch) checks env
+#   AUTOCLI_CDP_ENDPOINT; if set, uses CdpPage (direct CDP WS attach) instead
+#   of DaemonPage (extension passthrough). Wrapper script
+#   `topview-upload-direct.sh` discovers the WS endpoint and sets the env var.
+#
+#   CdpPage::set_file_input (autocli-browser/src/cdp.rs) does the standard CDP
+#   chain — DOM.enable + DOM.getDocument + DOM.querySelector + DOM.setFileInputFiles
+#   — which WORKS over a direct attach (Puppeteer / Playwright use this pattern
+#   for years). MV3's silent no-op doesn't apply because we're not in MV3.
+#
+# Args:
+#   file_path · ABSOLUTE local file path (must start with '/'; '~' rejected — wrap with $HOME or realpath)
+#   file_name · optional logging hint
+
+site: topview
+name: upload-asset
+description: S321 v9 · Upload via direct CDP attach (AUTOCLI_CDP_ENDPOINT · CdpPage::set_file_input) · 0 cost
+domain: www.topview.ai
+strategy: cookie
+browser: true
+# S321 gh#34 · upload 約 15-30s wall · 300s upper bound (預設 60s 含 P3 verify wait 容易撞)
+timeoutSeconds: 300
+
+args:
+  file_path:
+    type: string
+    description: ABSOLUTE local file path
+  file_name:
+    type: string
+    default: ""
+    description: Optional logging hint
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 4
+
+  # P1 · All JS navigation in single evaluate · materialize file input · finish with input tagged
+  - evaluate: |
+      (async () => {
+        window.__upLog = [];
+        const log = (p, s, d) => window.__upLog.push({ phase: p, status: s, detail: d });
+        log('P0-args', 'OK', `file_path=${{ args.file_path }} hint=${{ args.file_name }}`);
+
+        const click = async (el) => {
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+          el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseover'));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mousedown'));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseup'));
+          el.dispatchEvent(mk('click'));
+          if (el.click) el.click();
+        };
+
+        // Click 影片
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1-video', 'FAIL', 'NO_VIDEO'); return { ok: false }; }
+        await click(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1-video', 'OK', '影片 panel opened');
+
+        // Click 全參考 SEEDANCE2
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1-seedance', 'FAIL', 'NO_SEEDANCE'); return { ok: false }; }
+        await click(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1-seedance', 'OK', 'SEEDANCE2 mode opened');
+
+        // P1.4 · capture INITIAL counter so P3 can detect upload via delta.
+        const counterElInit = Array.from(document.querySelectorAll('div, span, p')).find(e => /^已載入到底\s*\(\d+\)/.test((e.innerText || '').trim()));
+        const counterMatchInit = counterElInit ? (counterElInit.innerText.trim().match(/\((\d+)\)/) || [null, '-1']) : [null, '-1'];
+        window.__upCounterBefore = parseInt(counterMatchInit[1], 10);
+        log('P1-counterBefore', 'OK', `已載入到底(${window.__upCounterBefore})`);
+
+        // P1.5 · tag the hidden file input. CdpPage::set_file_input uses
+        // DOM.querySelector(selector) → DOM.setFileInputFiles(nodeId, files),
+        // which DOES populate input.files when called over a direct CDP attach.
+        const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+        if (inputs.length === 0) {
+          log('P1-tag', 'FAIL', 'no input[type=file] in DOM after 全參考 click');
+          return { ok: false };
+        }
+        // Prefer the input whose accept includes image types (skips any non-upload inputs).
+        const inp = inputs.find(i => (i.accept || '').includes('image') || (i.accept || '').includes('.jpg')) || inputs[0];
+        inp.setAttribute('data-s321-target', '1');
+        log('P1-tag', 'OK', `tagged input · accept='${(inp.accept || '').slice(0, 50)}' hidden_class='${inp.className || ''}'`);
+        return { ok: true };
+      })()
+  - wait: 1
+
+  # P2 · upload-file step routes to CdpPage::set_file_input (direct CDP attach)
+  # which sends DOM.enable + DOM.getDocument + DOM.querySelector + DOM.setFileInputFiles.
+  # In direct CDP (Chrome started with --remote-debugging-port) this populates input.files
+  # and fires the trusted `change` event, which Topview's onChange handler reads to upload.
+  - upload-file:
+      selector: 'input[data-s321-target="1"]'
+      files:
+        - "${{ args.file_path }}"
+  - wait: 3
+
+  # P2.5 · verify input.files populated (direct CDP should set this immediately).
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__upLog.push({ phase: p, status: s, detail: d });
+        const inp = document.querySelector('input[data-s321-target="1"]');
+        if (!inp) { log('P2.5-check', 'WARN', 'tagged input gone — Topview may have re-rendered after upload'); return; }
+        const fl = inp.files ? inp.files.length : -1;
+        const detail = fl > 0
+          ? `inp.files.length=${fl} name=${inp.files[0].name} size=${inp.files[0].size}`
+          : `inp.files.length=${fl} (still 0 · setFileInputFiles may have failed)`;
+        log('P2.5-check', fl > 0 ? 'PASS' : 'FAIL', detail);
+        const cdpDiag = window.__upDiagCdp;
+        log('P2.5-cdpDiag', cdpDiag ? 'OK' : 'WARN', cdpDiag ? JSON.stringify(cdpDiag) : 'window.__upDiagCdp not set');
+      })()
+  - wait: 18
+
+  # P3 · verify upload via board counter delta (before vs after).
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__upLog.push({ phase: p, status: s, detail: d });
+        const counterEl = Array.from(document.querySelectorAll('div, span, p')).find(e => /^已載入到底\s*\(\d+\)/.test((e.innerText || '').trim()));
+        const counter = counterEl ? counterEl.innerText.trim() : 'N/A';
+        const counterMatch = counter.match(/\((\d+)\)/);
+        const counterAfter = counterMatch ? parseInt(counterMatch[1], 10) : -1;
+        const before = (typeof window.__upCounterBefore === 'number') ? window.__upCounterBefore : -1;
+        const delta = (before >= 0 && counterAfter >= 0) ? (counterAfter - before) : null;
+        const verdict = (delta !== null && delta >= 1) ? 'PASS' : 'FAIL';
+        log('P3-counter', verdict, `before=${before} after=${counterAfter} delta=${delta}`);
+        const assetImgs = Array.from(document.querySelectorAll('img')).filter(im => {
+          const r = im.getBoundingClientRect();
+          return r.width > 50 && r.height > 50 && (im.src || '').includes('Key-Pair-Id');
+        });
+        if (assetImgs.length > 0) {
+          const first = assetImgs[0];
+          const m = (first.src || '').match(/cloudfront\.net\/([^?]+)/);
+          log('P3-newest', 'OK', `idx0 uuid=${m ? m[1].slice(0, 50) : 'NO_MATCH'}`);
+        }
+      })()
+
+  - evaluate: |
+      window.__upLog

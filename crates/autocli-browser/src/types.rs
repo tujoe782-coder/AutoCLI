@@ -21,6 +21,28 @@ pub struct DaemonCommand {
     /// CDP method params for 'cdp' action · hermesDr fork
     #[serde(skip_serializing_if = "Option::is_none", rename = "cdpParams")]
     pub cdp_params: Option<Value>,
+    /// File paths for 'set-file-input' action (kept for logging / debugging — actual transfer goes via fileBlobs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<String>>,
+    /// Selector for 'set-file-input' action — drop-zone element (defaults to 'input[type="file"]' on extension side)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub selector: Option<String>,
+    /// Inline file contents (base64) for 'set-file-input' action (S321 gh#34 · drag-drop pattern).
+    /// Carries file bytes through to the page since CDP DOM.setFileInputFiles is silently no-op'd
+    /// from MV3 chrome.debugger context — we bypass the file chooser entirely and dispatch
+    /// synthetic drag-drop events with reconstructed File objects.
+    #[serde(skip_serializing_if = "Option::is_none", rename = "fileBlobs")]
+    pub file_blobs: Option<Vec<FileBlob>>,
+}
+
+/// Inline file payload for upload via drag-drop. Sent in DaemonCommand.fileBlobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileBlob {
+    pub name: String,
+    /// Base64-encoded file contents.
+    pub b64: String,
+    /// MIME type (e.g. "image/jpeg"). Guessed from filename extension by the sender.
+    pub mime: String,
 }
 
 impl DaemonCommand {
@@ -35,6 +57,9 @@ impl DaemonCommand {
             format: None,
             cdp_method: None,
             cdp_params: None,
+            files: None,
+            selector: None,
+            file_blobs: None,
         }
     }
 
@@ -72,6 +97,24 @@ impl DaemonCommand {
     /// hermesDr fork: set CDP params for 'cdp' action.
     pub fn with_cdp_params(mut self, params: Value) -> Self {
         self.cdp_params = Some(params);
+        self
+    }
+
+    /// hermesDr fork: set file paths for 'set-file-input' action.
+    pub fn with_files(mut self, files: Vec<String>) -> Self {
+        self.files = Some(files);
+        self
+    }
+
+    /// hermesDr fork: set selector for 'set-file-input' action.
+    pub fn with_selector(mut self, selector: impl Into<String>) -> Self {
+        self.selector = Some(selector.into());
+        self
+    }
+
+    /// hermesDr fork (S321 gh#34): set inline file blobs for 'set-file-input' drag-drop action.
+    pub fn with_file_blobs(mut self, blobs: Vec<FileBlob>) -> Self {
+        self.file_blobs = Some(blobs);
         self
     }
 }

@@ -332,4 +332,132 @@ impl IPage for CdpPage {
     async fn send_cdp(&self, method: &str, params: Value) -> Result<Value, CliError> {
         self.send_cdp_raw(method, params).await
     }
+
+    /// hermesDr fork (S321 gh#34) · programmatic file upload via direct CDP.
+    ///
+    /// Uses Puppeteer's standard pattern: Runtime.evaluate with
+    /// `returnByValue:false` to get the input element as a RemoteObject (with
+    /// an objectId), then DOM.setFileInputFiles({objectId, files}). Empirically
+    /// Chrome 147 silently no-op's setFileInputFiles when called with `nodeId`
+    /// (from DOM.getDocument + DOM.querySelector chain) over a chrome.debugger
+    /// or direct-CDP attach — but the **objectId** path is the one Puppeteer
+    /// and Playwright use in production and is not subject to that silent
+    /// rejection.
+    async fn set_file_input(
+        &self,
+        selector: &str,
+        files: Vec<String>,
+    ) -> Result<(), CliError> {
+        let query = if selector.is_empty() {
+            "input[type=\"file\"]"
+        } else {
+            selector
+        };
+        let query_lit = serde_json::to_string(query)
+            .unwrap_or_else(|_| "\"input[type=\\\"file\\\"]\"".into());
+
+        // Enable domains Puppeteer typically warms up before DOM manipulation.
+        // Chrome may silently restrict setFileInputFiles otherwise.
+        let _ = self.send_cdp_raw("Page.enable", json!({})).await;
+        let _ = self.send_cdp_raw("Runtime.enable", json!({})).await;
+        let _ = self.send_cdp_raw("DOM.enable", json!({})).await;
+
+        // Topview's input has class="hidden" (display:none). Some Chrome versions
+        // silently no-op setFileInputFiles on inputs that aren't laid out. Force
+        // it visible (1x1 fixed-pos, near-transparent) before the call; restore after.
+        let unhide_expr = format!(
+            r#"(() => {{
+                const inp = document.querySelector({q});
+                if (!inp) return null;
+                inp.__s321_origStyle = inp.getAttribute('style') || '';
+                inp.__s321_origClass = inp.className;
+                inp.style.cssText = 'position:fixed;top:0;left:0;width:1px;height:1px;opacity:0.001;display:block;visibility:visible;pointer-events:auto;z-index:2147483647';
+                if (typeof inp.className === 'string' && inp.className.indexOf('hidden') >= 0) {{
+                    inp.className = inp.className.replace(/\bhidden\b/g, ' ').trim();
+                }}
+                inp.removeAttribute('hidden');
+                return inp;
+            }})()"#,
+            q = query_lit
+        );
+        let eval = self
+            .send_cdp_raw(
+                "Runtime.evaluate",
+                json!({
+                    "expression": unhide_expr,
+                    "returnByValue": false,
+                    "awaitPromise": false,
+                }),
+            )
+            .await?;
+        if let Some(exc) = eval.get("exceptionDetails") {
+            return Err(CliError::command_execution(format!(
+                "set_file_input: unhide/resolve eval threw: {}",
+                exc.get("text").and_then(|t| t.as_str()).unwrap_or("?")
+            )));
+        }
+        let result_obj = eval
+            .get("result")
+            .ok_or_else(|| CliError::command_execution("Runtime.evaluate returned no result"))?;
+        let subtype = result_obj.get("subtype").and_then(|s| s.as_str());
+        let object_id = result_obj
+            .get("objectId")
+            .and_then(|o| o.as_str())
+            .ok_or_else(|| {
+                if subtype == Some("null") {
+                    CliError::command_execution(format!(
+                        "set_file_input: no element matched selector {}",
+                        query
+                    ))
+                } else {
+                    CliError::command_execution(format!(
+                        "set_file_input: Runtime.evaluate returned no objectId (subtype={:?})",
+                        subtype
+                    ))
+                }
+            })?
+            .to_string();
+
+        let set_response = self
+            .send_cdp_raw(
+                "DOM.setFileInputFiles",
+                json!({"objectId": object_id, "files": files}),
+            )
+            .await?;
+        tracing::info!(?set_response, "DOM.setFileInputFiles raw response");
+
+        // Read back .files.length immediately so we can store diag for yaml to inspect.
+        // Also restore original style/class.
+        let verify_expr = format!(
+            r#"(() => {{
+                const inp = document.querySelector({q});
+                const out = {{ filesLen: inp ? inp.files.length : -1,
+                               firstName: inp && inp.files[0] ? inp.files[0].name : null,
+                               firstSize: inp && inp.files[0] ? inp.files[0].size : null,
+                               isConnected: inp ? inp.isConnected : null,
+                               className: inp ? (inp.className || '') : null }};
+                if (inp) {{
+                    inp.setAttribute('style', inp.__s321_origStyle || '');
+                    if (typeof inp.__s321_origClass === 'string') inp.className = inp.__s321_origClass;
+                    delete inp.__s321_origStyle; delete inp.__s321_origClass;
+                }}
+                window.__upDiagCdp = out;
+                return out;
+            }})()"#,
+            q = query_lit
+        );
+        let verify = self
+            .send_cdp_raw(
+                "Runtime.evaluate",
+                json!({"expression": verify_expr, "returnByValue": true}),
+            )
+            .await?;
+        tracing::info!(?verify, "post-setFileInputFiles verify result");
+
+        let _ = self
+            .send_cdp_raw("Runtime.releaseObject", json!({"objectId": object_id}))
+            .await;
+
+        Ok(())
+    }
 }
