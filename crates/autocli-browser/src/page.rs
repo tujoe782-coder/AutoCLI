@@ -126,8 +126,16 @@ impl IPage for DaemonPage {
         Ok(())
     }
 
-    async fn cookies(&self, _options: Option<CookieOptions>) -> Result<Vec<Cookie>, CliError> {
-        let cmd = self.cmd("cookies").await;
+    async fn cookies(&self, options: Option<CookieOptions>) -> Result<Vec<Cookie>, CliError> {
+        let mut cmd = self.cmd("cookies").await;
+        // S322: daemon refuses bulk cookie dumps. Pass domain scope if caller provided one.
+        if let Some(opts) = options {
+            if let Some(d) = opts.domain {
+                if !d.is_empty() {
+                    cmd = cmd.with_domain(d);
+                }
+            }
+        }
         let val = self.send(cmd).await?;
         let cookies: Vec<Cookie> = serde_json::from_value(val).unwrap_or_default();
         Ok(cookies)

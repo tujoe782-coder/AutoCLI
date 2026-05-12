@@ -33,6 +33,10 @@ pub struct DaemonCommand {
     /// synthetic drag-drop events with reconstructed File objects.
     #[serde(skip_serializing_if = "Option::is_none", rename = "fileBlobs")]
     pub file_blobs: Option<Vec<FileBlob>>,
+    /// S322: cookie domain scope for `cookies` action (daemon refuses bulk dumps).
+    /// Set to the target host (e.g. `www.topview.ai` or `.topview.ai` for wildcard).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
 }
 
 /// Inline file payload for upload via drag-drop. Sent in DaemonCommand.fileBlobs.
@@ -60,6 +64,7 @@ impl DaemonCommand {
             files: None,
             selector: None,
             file_blobs: None,
+            domain: None,
         }
     }
 
@@ -115,6 +120,12 @@ impl DaemonCommand {
     /// hermesDr fork (S321 gh#34): set inline file blobs for 'set-file-input' drag-drop action.
     pub fn with_file_blobs(mut self, blobs: Vec<FileBlob>) -> Self {
         self.file_blobs = Some(blobs);
+        self
+    }
+
+    /// S322: set cookie domain scope for `cookies` action.
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
         self
     }
 }

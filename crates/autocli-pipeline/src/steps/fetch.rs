@@ -3,11 +3,46 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::{self, StreamExt};
-use autocli_core::{CliError, IPage};
+use autocli_core::{CliError, Cookie, CookieOptions, IPage};
 use serde_json::Value;
 
 use crate::step_registry::{StepHandler, StepRegistry};
 use crate::template::{render_template, render_template_str, TemplateContext};
+
+/// S322: same-origin cookie filter for `useSessionCookies: true`.
+///
+/// Browser-style domain match:
+///   - cookie.domain == host (exact, case-insensitive), OR
+///   - cookie.domain starts with '.' and host ends with cookie.domain
+///
+/// Cookies without a domain attribute are treated as host-only and matched
+/// against the target host exactly. Cookies with an empty domain are skipped
+/// (defensive).
+///
+/// Returns the serialized `name=value; ...` string, or empty if no match.
+fn build_session_cookie_header(cookies: &[Cookie], target_host: &str) -> String {
+    let target_host = target_host.to_lowercase();
+    let filtered: Vec<&Cookie> = cookies
+        .iter()
+        .filter(|c| {
+            let d = c
+                .domain
+                .as_deref()
+                .unwrap_or("")
+                .trim_start_matches('.')
+                .to_lowercase();
+            if d.is_empty() {
+                return false;
+            }
+            target_host == d || target_host.ends_with(&format!(".{}", d))
+        })
+        .collect();
+    filtered
+        .iter()
+        .map(|c| format!("{}={}", c.name, c.value))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 
 /// Helper to create an HTTP CliError.
 fn http_error(msg: impl Into<String>) -> CliError {
@@ -190,15 +225,15 @@ impl StepHandler for FetchStep {
 
     async fn execute(
         &self,
-        _page: Option<Arc<dyn IPage>>,
+        page: Option<Arc<dyn IPage>>,
         params: &Value,
         data: &Value,
         args: &HashMap<String, Value>,
     ) -> Result<Value, CliError> {
         // Extract URL, method, headers, body from params
-        let (url_template, method, headers_template, body_template, query_params_template) = match params {
+        let (url_template, method, headers_template, body_template, query_params_template, use_session_cookies) = match params {
             // Mode 1: simple URL string
-            Value::String(url) => (url.clone(), "GET".to_string(), None, None, None),
+            Value::String(url) => (url.clone(), "GET".to_string(), None, None, None, false),
             // Mode 2/3: object params
             Value::Object(obj) => {
                 let url = obj
@@ -214,7 +249,13 @@ impl StepHandler for FetchStep {
                 let headers = obj.get("headers").cloned();
                 let body = obj.get("body").cloned();
                 let query_params = obj.get("params").cloned();
-                (url, method, headers, body, query_params)
+                // S322: useSessionCookies flag → auto-inject Cookie: from page session,
+                // filtered by same-origin (target URL host vs cookie.domain).
+                let use_session_cookies = obj
+                    .get("useSessionCookies")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                (url, method, headers, body, query_params, use_session_cookies)
             }
             _ => return Err(CliError::pipeline("fetch: params must be a string URL or an object")),
         };
@@ -313,6 +354,52 @@ impl StepHandler for FetchStep {
                 None => None,
             };
 
+            // S322: inject session cookies if requested, filtered by same-origin
+            let rendered_headers = if use_session_cookies {
+                let pg = page.as_ref().ok_or_else(|| {
+                    CliError::pipeline(
+                        "fetch: useSessionCookies=true requires browser: true at pipeline level (no page in context)",
+                    )
+                })?;
+                let target_host = url::Url::parse(&url_str)
+                    .map_err(|e| http_error(format!(
+                        "fetch: useSessionCookies — invalid url for cookie injection: {e}"
+                    )))?
+                    .host_str()
+                    .ok_or_else(|| http_error("fetch: useSessionCookies — url has no host"))?
+                    .to_string();
+                // S322: pass target host as cookie scope so the daemon doesn't refuse
+                // (daemon enforces "Cookie scope required: provide domain or url").
+                // Derive apex domain (strip leading 'www.') so wildcard-domain cookies
+                // (e.g. `.topview.ai`) are included.
+                let scope_domain = target_host
+                    .strip_prefix("www.")
+                    .unwrap_or(&target_host)
+                    .to_string();
+                let cookies: Vec<Cookie> = pg
+                    .cookies(Some(CookieOptions {
+                        name: None,
+                        domain: Some(scope_domain),
+                    }))
+                    .await?;
+                let cookie_header = build_session_cookie_header(&cookies, &target_host);
+                if cookie_header.is_empty() {
+                    tracing::warn!(
+                        target_host = %target_host,
+                        cookie_count = cookies.len(),
+                        "fetch: useSessionCookies — 0 matching cookies for host (session expired or wrong domain?)"
+                    );
+                }
+                let mut hmap: serde_json::Map<String, Value> = match rendered_headers {
+                    Some(Value::Object(m)) => m,
+                    _ => serde_json::Map::new(),
+                };
+                hmap.insert("cookie".to_string(), Value::String(cookie_header));
+                Some(Value::Object(hmap))
+            } else {
+                rendered_headers
+            };
+
             // Render body if present
             let rendered_body = match &body_template {
                 Some(b) => Some(render_template(b, &ctx)?),
@@ -389,5 +476,148 @@ mod tests {
             .execute(None, &params, &json!(null), &HashMap::new())
             .await;
         assert!(result.is_err());
+    }
+
+    // ─── S322 tests ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn use_session_cookies_without_page_returns_pipeline_error() {
+        // T8: useSessionCookies=true with page=None must error cleanly.
+        let step = FetchStep::new();
+        let params = json!({
+            "url": "https://example.com",
+            "method": "GET",
+            "useSessionCookies": true,
+        });
+        let err = step
+            .execute(None, &params, &json!(null), &HashMap::new())
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("useSessionCookies"),
+            "error should mention useSessionCookies: {msg}"
+        );
+        assert!(
+            msg.contains("browser"),
+            "error should mention browser context: {msg}"
+        );
+    }
+
+    #[test]
+    fn build_session_cookie_header_same_origin_filter() {
+        // T12: only cookies whose .domain matches target host get injected.
+        let cookies = vec![
+            Cookie {
+                name: "session".to_string(),
+                value: "TOPVIEW_SECRET".to_string(),
+                domain: Some(".topview.ai".to_string()),
+                path: None,
+                expires: None,
+                http_only: None,
+                secure: None,
+                same_site: None,
+            },
+            Cookie {
+                name: "evil".to_string(),
+                value: "ATTACKER_SECRET".to_string(),
+                domain: Some("attacker.example".to_string()),
+                path: None,
+                expires: None,
+                http_only: None,
+                secure: None,
+                same_site: None,
+            },
+            Cookie {
+                name: "host_only".to_string(),
+                value: "HOST_ONLY".to_string(),
+                domain: Some("www.topview.ai".to_string()),
+                path: None,
+                expires: None,
+                http_only: None,
+                secure: None,
+                same_site: None,
+            },
+        ];
+
+        // Match: .topview.ai (wildcard parent) + www.topview.ai (exact) → 2 cookies
+        let header = build_session_cookie_header(&cookies, "www.topview.ai");
+        assert!(header.contains("session=TOPVIEW_SECRET"), "session cookie should be injected: {header}");
+        assert!(header.contains("host_only=HOST_ONLY"), "host-only cookie should be injected: {header}");
+        assert!(
+            !header.contains("ATTACKER_SECRET"),
+            "attacker cookie must NOT leak: {header}"
+        );
+
+        // Different target host → only attacker cookie matches (or none if not a subdomain)
+        let header_attacker = build_session_cookie_header(&cookies, "attacker.example");
+        assert!(
+            !header_attacker.contains("TOPVIEW_SECRET"),
+            "topview cookie must NOT leak to attacker host: {header_attacker}"
+        );
+        assert!(header_attacker.contains("evil=ATTACKER_SECRET"));
+
+        // Subdomain of cookie.domain → matches wildcard
+        let header_sub = build_session_cookie_header(&cookies, "board.topview.ai");
+        assert!(
+            header_sub.contains("session=TOPVIEW_SECRET"),
+            "subdomain should match .topview.ai wildcard: {header_sub}"
+        );
+        assert!(
+            !header_sub.contains("host_only=HOST_ONLY"),
+            "host-only cookie should NOT match different subdomain: {header_sub}"
+        );
+    }
+
+    #[test]
+    fn build_session_cookie_header_empty_when_no_match() {
+        let cookies = vec![Cookie {
+            name: "a".to_string(),
+            value: "b".to_string(),
+            domain: Some(".example.com".to_string()),
+            path: None,
+            expires: None,
+            http_only: None,
+            secure: None,
+            same_site: None,
+        }];
+        assert_eq!(
+            build_session_cookie_header(&cookies, "topview.ai"),
+            "",
+            "no matching cookies → empty header string"
+        );
+    }
+
+    #[test]
+    fn build_session_cookie_header_skips_empty_domain() {
+        // Defensive: cookies with no domain attribute (None or empty string)
+        // are skipped to prevent accidental injection.
+        let cookies = vec![
+            Cookie {
+                name: "no_domain".to_string(),
+                value: "x".to_string(),
+                domain: None,
+                path: None,
+                expires: None,
+                http_only: None,
+                secure: None,
+                same_site: None,
+            },
+            Cookie {
+                name: "empty_domain".to_string(),
+                value: "y".to_string(),
+                domain: Some("".to_string()),
+                path: None,
+                expires: None,
+                http_only: None,
+                secure: None,
+                same_site: None,
+            },
+        ];
+        assert_eq!(
+            build_session_cookie_header(&cookies, "example.com"),
+            "",
+            "cookies with empty/None domain should not be injected"
+        );
     }
 }
