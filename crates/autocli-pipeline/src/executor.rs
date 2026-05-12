@@ -15,6 +15,23 @@ const MAX_BROWSER_ATTEMPTS: usize = 3;
 ///
 /// Steps are executed sequentially. Each step receives the current `data` and
 /// returns new `data`. Browser steps get up to 2 retries on transient errors.
+///
+/// **S322 saveTo extension**: A step may optionally include a `saveTo` sibling
+/// key (peer to the step name). When set, the step's return value is wrapped
+/// into `data[key]` (namespacing) instead of replacing `data` entirely. This
+/// enables multi-step pipelines that need to combine outputs from several
+/// steps (e.g. fetch STS credentials → use them in a later upload step).
+///
+/// Yaml example:
+/// ```yaml
+/// - fetch:
+///     url: "https://example.com"
+///   saveTo: response   # New: namespaces result under data.response
+/// - tap:
+///     message: "got ${{ data.response.body }}"
+/// ```
+///
+/// Backward compat: steps without `saveTo` keep legacy "replace data" behavior.
 pub async fn execute_pipeline(
     page: Option<Arc<dyn IPage>>,
     pipeline: &[Value],
@@ -28,14 +45,28 @@ pub async fn execute_pipeline(
             CliError::pipeline(format!("Step {i} is not an object: {step}"))
         })?;
 
-        if obj.len() != 1 {
+        // S322: extract optional `saveTo` key (top-level, peer to step name).
+        let save_to: Option<String> = obj
+            .get("saveTo")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        // Step name + params = the single non-saveTo entry.
+        let step_entries: Vec<(&String, &Value)> = obj
+            .iter()
+            .filter(|(k, _)| k.as_str() != "saveTo")
+            .collect();
+
+        if step_entries.len() != 1 {
+            let keys: Vec<&str> = step_entries.iter().map(|(k, _)| k.as_str()).collect();
             return Err(CliError::pipeline(format!(
-                "Step {i} must have exactly one key, found {}",
-                obj.len()
+                "Step {i} must have exactly one step key (plus optional saveTo), found {} non-saveTo keys: {:?}",
+                step_entries.len(),
+                keys
             )));
         }
 
-        let (step_name, params) = obj.iter().next().unwrap();
+        let (step_name, params) = step_entries[0];
 
         let handler = registry.get(step_name).ok_or_else(|| {
             CliError::pipeline(format!("Unknown step '{step_name}' at index {i}"))
@@ -50,7 +81,24 @@ pub async fn execute_pipeline(
                 .await
             {
                 Ok(result) => {
-                    data = result;
+                    match &save_to {
+                        Some(key) => {
+                            // S322: wrap result into data[key] (namespace).
+                            // If data is already an Object, extend it; otherwise
+                            // start a fresh Object containing just this key.
+                            let prev = std::mem::replace(&mut data, Value::Null);
+                            let mut map = match prev {
+                                Value::Object(m) => m,
+                                _ => serde_json::Map::new(),
+                            };
+                            map.insert(key.clone(), result);
+                            data = Value::Object(map);
+                        }
+                        None => {
+                            // Legacy: replace data entirely.
+                            data = result;
+                        }
+                    }
                     last_error = None;
                     break;
                 }
@@ -248,5 +296,90 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("transient browser error"));
+    }
+
+    // ─── S322: saveTo namespacing tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn save_to_namespaces_result_under_key() {
+        let mut registry = StepRegistry::new();
+        registry.register(Arc::new(EchoStep));
+
+        let pipeline = vec![
+            json!({"echo": "hello", "saveTo": "greeting"}),
+            json!({"echo": "world", "saveTo": "subject"}),
+        ];
+        let result = execute_pipeline(None, &pipeline, &empty_args(), &registry)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"greeting": "hello", "subject": "world"}));
+    }
+
+    #[tokio::test]
+    async fn save_to_extends_existing_namespace() {
+        let mut registry = StepRegistry::new();
+        registry.register(Arc::new(EchoStep));
+
+        let pipeline = vec![
+            json!({"echo": {"key1": "val1"}, "saveTo": "first"}),
+            json!({"echo": {"key2": "val2"}, "saveTo": "second"}),
+        ];
+        let result = execute_pipeline(None, &pipeline, &empty_args(), &registry)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({
+            "first": {"key1": "val1"},
+            "second": {"key2": "val2"}
+        }));
+    }
+
+    #[tokio::test]
+    async fn step_without_save_to_replaces_data_backward_compat() {
+        // Legacy yaml without saveTo must behave as before (replace).
+        let mut registry = StepRegistry::new();
+        registry.register(Arc::new(EchoStep));
+
+        let pipeline = vec![
+            json!({"echo": "first"}),
+            json!({"echo": "second"}),
+        ];
+        let result = execute_pipeline(None, &pipeline, &empty_args(), &registry)
+            .await
+            .unwrap();
+        assert_eq!(result, json!("second"));
+    }
+
+    #[tokio::test]
+    async fn save_to_after_non_save_to_starts_fresh_namespace() {
+        // If a prior step left data as non-Object, saveTo starts fresh.
+        let mut registry = StepRegistry::new();
+        registry.register(Arc::new(EchoStep));
+
+        let pipeline = vec![
+            json!({"echo": "ignored"}),  // data becomes String "ignored"
+            json!({"echo": "kept", "saveTo": "result"}),
+        ];
+        let result = execute_pipeline(None, &pipeline, &empty_args(), &registry)
+            .await
+            .unwrap();
+        assert_eq!(result, json!({"result": "kept"}));
+    }
+
+    #[tokio::test]
+    async fn save_to_rejects_two_non_save_to_keys() {
+        // {echo: ..., append: ..., saveTo: ...} is invalid — must have exactly
+        // one step key besides saveTo.
+        let mut registry = StepRegistry::new();
+        registry.register(Arc::new(EchoStep));
+        registry.register(Arc::new(AppendStep));
+
+        let pipeline = vec![
+            json!({"echo": "a", "append": "b", "saveTo": "x"}),
+        ];
+        let err = execute_pipeline(None, &pipeline, &empty_args(), &registry)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("exactly one step key"),
+            "expected error to mention 'exactly one step key', got: {}", err);
     }
 }
