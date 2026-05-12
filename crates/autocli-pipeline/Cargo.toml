@@ -18,3 +18,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures = "0.3"
 base64 = "0.22"
 urlencoding = "2"
+
+# S322: HTTP + S3 SigV4 direct upload (upload_s3 step)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+chrono = { version = "0.4", features = ["clock"], default-features = false }
+url = "2"
+imagesize = "0.13"   # extract width/height/format from image header bytes (zero-deps)
