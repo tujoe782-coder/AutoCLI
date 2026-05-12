@@ -40,6 +40,13 @@ fn build_cli(registry: &Registry, external_clis: &[ExternalCli]) -> Command {
                 .global(true)
                 .action(ArgAction::SetTrue)
                 .help("Enable verbose output"),
+        )
+        .arg(
+            Arg::new("timeout")
+                .long("timeout")
+                .global(true)
+                .value_parser(clap::value_parser!(u64))
+                .help("Override command timeout in seconds (overrides yaml timeoutSeconds + AUTOCLI_BROWSER_COMMAND_TIMEOUT env)"),
         );
 
     // Add site subcommands from the adapter registry
@@ -603,6 +610,18 @@ async fn main() {
 
     if verbose {
         tracing::info!("Verbose mode enabled");
+    }
+
+    // S322 gh#35 · belt-and-suspenders timeout override at CLI level.
+    // Precedence: --timeout flag > AUTOCLI_BROWSER_COMMAND_TIMEOUT env >
+    //             yaml `timeoutSeconds:` > built-in 60s default.
+    // execution.rs::command_timeout already reads the env var, so we just set it.
+    if let Some(timeout_secs) = matches.get_one::<u64>("timeout").copied() {
+        // SAFETY: env::set_var on a single-threaded main() before tokio dispatch.
+        std::env::set_var("AUTOCLI_BROWSER_COMMAND_TIMEOUT", timeout_secs.to_string());
+        if verbose {
+            tracing::info!(timeout_secs, "Command timeout overridden via --timeout flag");
+        }
     }
 
     let output_format = OutputFormat::from_str(&format_str).unwrap_or_default();
