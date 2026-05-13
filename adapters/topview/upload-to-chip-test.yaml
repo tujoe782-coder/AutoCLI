@@ -1,0 +1,156 @@
+# S326 upload-to-chip-test · Test direct upload via blessed `upload-file:` step
+#
+# Discovery: nashsu/AutoCLI upstream + tujoe782-coder/AutoCLI fork ship a dedicated
+# `upload-file:` yaml step (crates/autocli-pipeline/src/steps/browser.rs:690-776)
+# that bypasses Chrome 147 silent-fail by using drag-drop simulation via extension:
+#   1. Rust reads file bytes (full FS access)
+#   2. Base64 encode + send through daemon → extension
+#   3. Extension reconstructs File · builds DataTransfer · dispatches dragenter/dragover/drop
+#   4. Topview React onDrop picks up dataTransfer.files
+#
+# This adapter tests whether this BLESSED path works for Topview upload box.
+# If YES · obsoletes Y-path workaround (no board pollution · no chooser ambiguity).
+# If NO · stay on Path B (Y-path + chooser-recon visual ID).
+#
+# License: Apache-2.0
+
+site: topview
+name: upload-to-chip-test
+description: Test blessed `upload-file:` step on Topview panel · bypass Chrome 147 lock via drag-drop sim · 0 cr
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 120
+
+args:
+  file_path:
+    type: string
+    description: Absolute path to PNG/JPG to test-upload
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ===========================================================================
+  # P1 · Switch to 影片 → 全參考 SEEDANCE2 panel
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        window.__chipLog = [];
+        const log = (p, s, d) => window.__chipLog.push({ phase: p, status: s, detail: d });
+
+        const mkClick = async (el) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          ['pointerover','pointerenter'].forEach(t => el.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          ['mouseover','mouseenter'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          if (typeof el.click === 'function') el.click();
+        };
+
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1', 'FAIL', 'VIDEO_BTN_NOT_FOUND'); return { ok:false }; }
+        await mkClick(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1.1', 'OK', '影片 panel opened');
+
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1.2', 'FAIL', 'SEEDANCE_BTN_NOT_FOUND'); return { ok:false }; }
+        await mkClick(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1.2', 'OK', 'SEEDANCE2 panel opened');
+
+        // Pre-upload state snapshot
+        const inputs = Array.from(document.querySelectorAll('input[type=file]'));
+        log('P1.3', 'INFO', `input[type=file] count=${inputs.length} · BEFORE upload-file`);
+
+        // Verify selector candidates for drag-drop target
+        const trySelectors = [
+          'button.border-dashed',
+          'button.border-dashed:has(svg.lucide-upload)',
+          'button.h-24.w-24',
+          'button:has(svg.lucide-upload)'
+        ];
+        for (const sel of trySelectors) {
+          try {
+            const m = document.querySelectorAll(sel);
+            log(`P1.4.sel`, 'INFO', `'${sel}' matches: ${m.length}`);
+          } catch (e) {
+            log(`P1.4.sel`, 'FAIL', `'${sel}' threw: ${e.message}`);
+          }
+        }
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P2 · BLESSED PATH · upload-file step (drag-drop simulation via extension)
+  # ===========================================================================
+  # Drag-drop target = 匯入 button box (per upload-box-recon P4: dragover handler preventDefault'd=true on this element).
+  # Use :has() selector to find the upload-button containing the lucide-upload SVG.
+  - upload-file:
+      selector: 'button.border-dashed:has(svg.lucide-upload)'
+      files:
+        - "${{ args.file_path }}"
+
+  - wait: 8
+
+  # ===========================================================================
+  # P3 · Verify · check if chip preview appears in upload box
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__chipLog.push({ phase: p, status: s, detail: d });
+
+        // Re-check input.files (drag-drop sim may bypass · so could still be 0)
+        const inputs = Array.from(document.querySelectorAll('input[type=file]'));
+        const inp = inputs[0];
+        const fcount = inp?.files?.length || 0;
+        log('P3.1', 'INFO', `input.files.length post-upload-file: ${fcount} (drag-drop bypass · may stay 0 if React onDrop is the receiver)`);
+
+        // Broader sweep: dump ALL imgs with src + rect to find the chip preview wherever it is
+        const allImgs = Array.from(document.querySelectorAll('img'));
+        log('P3.2', 'INFO', `total <img> in DOM: ${allImgs.length}`);
+        allImgs.forEach((im, i) => {
+          const r = im.getBoundingClientRect();
+          const visible = r.width > 0 && r.height > 0;
+          if (visible) {
+            log(`P3.img.${i}`, 'INFO',
+              `rect=(${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}) ` +
+              `src_tail=${(im.src||'').split('/').pop().split('?')[0].slice(0,40)}`);
+          }
+        });
+
+        // Specifically look for blob: / data: URLs (locally-rendered previews from File object)
+        const localPreviews = allImgs.filter(im => {
+          const s = im.src || '';
+          return s.startsWith('blob:') || s.startsWith('data:');
+        });
+        log('P3.3', localPreviews.length > 0 ? 'PASS' : 'INFO', `blob:/data: image previews (locally-rendered from File): ${localPreviews.length}`);
+
+        // Check for upload-progress indicators
+        const progress = Array.from(document.querySelectorAll('[class*=progress],[class*=loading],[role=progressbar]'));
+        const visProg = progress.filter(p => {
+          const r = p.getBoundingClientRect();
+          const cs = window.getComputedStyle(p);
+          return r.width > 0 && r.height > 0 && cs.opacity !== '0';
+        });
+        log('P3.4', 'INFO', `visible upload-progress indicators: ${visProg.length}`);
+
+        const verdict = localPreviews.length > 0 ? 'PATH_A_VIABLE' : 'CHIP_NOT_APPEARING';
+        log('END', verdict, `Path A test verdict: ${verdict}`);
+
+        return window.__chipLog;
+      })()
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

@@ -1,7 +1,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket},
-        State, WebSocketUpgrade,
+        DefaultBodyLimit, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -70,6 +70,9 @@ impl Daemon {
             .allow_methods(tower_http::cors::Any)
             .allow_headers(tower_http::cors::Any);
 
+        // S326 AutoCLI#? · raise axum default body limit (2MB → 50MB) to allow
+        // upload-file step to send large base64-encoded blobs through daemon.
+        // hermesDr storyboard PNGs are 2-4MB · base64 inflates to ~3-6MB · exceeds default.
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/ping", get(health_handler))
@@ -79,6 +82,7 @@ impl Daemon {
             .route("/ai-stream", get(ai_stream_ws_handler))
             .route("/check-update", get(check_update_handler))
             .route("/ext", get(ws_handler))
+            .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
             .layer(cors)
             .with_state(state.clone());
 

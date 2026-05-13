@@ -1,0 +1,252 @@
+# S326 upload-box-recon · Topview AI 影片 panel upload box DOM + handler dump
+#
+# Purpose: Investigate the 匯入 upload box in the AI 影片 → 全參考 SEEDANCE2 panel
+#          to determine if direct file upload (bypassing board + chooser) is now viable.
+#          S321 gh#34 found Chrome 147 setFileInputFiles silent-fail. This recon
+#          checks current Chrome + Topview UI state to see if path is still locked.
+#
+# What we dump:
+#   1. input[type=file] elements in DOM (count + accept attr + multiple flag)
+#   2. 匯入 box DOM structure (button hierarchy · classes · event listeners)
+#   3. Hover-revealed sub-icons (what appears when you mouse over the box)
+#   4. Click behavior of 匯入 button (does it open file picker? OR overlay?)
+#   5. Drag-drop handlers (drop event listeners on box · drop zone overlay)
+#   6. Custom upload-related globals (window.__topview*, etc.)
+#
+# Read-only · no click on 匯入 (would open native file picker which would block recon)
+# 0 cr · no quota burn
+#
+# License: Apache-2.0
+
+site: topview
+name: upload-box-recon
+description: Recon Topview AI 影片 panel upload box · investigate direct-upload viability · read-only · 0 cr
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 90
+
+args: {}
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ===========================================================================
+  # P1 · Switch to AI 影片 → 全參考 SEEDANCE2 panel
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        window.__uboxLog = [];
+        const log = (p, s, d) => window.__uboxLog.push({ phase: p, status: s, detail: d });
+
+        const mkPointerSeq = async (el) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+          el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseover'));
+          el.dispatchEvent(mk('mouseenter'));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mousedown'));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseup'));
+          el.dispatchEvent(mk('click'));
+          if (typeof el.click === 'function') el.click();
+        };
+
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1', 'FAIL', 'VIDEO_BTN_NOT_FOUND'); return { ok: false }; }
+        await mkPointerSeq(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1.1', 'OK', '影片 panel opened');
+
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1.2', 'FAIL', 'SEEDANCE_BTN_NOT_FOUND'); return { ok: false }; }
+        await mkPointerSeq(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1.2', 'OK', 'SEEDANCE2 panel opened');
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P2 · Locate 匯入 upload box · dump structure (BEFORE hover · resting state)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__uboxLog.push({ phase: p, status: s, detail: d });
+
+        // 1. Find ALL input[type=file] in entire document
+        const allFileInputs = Array.from(document.querySelectorAll('input[type=file]'));
+        log('P2.input_file_count', 'INFO', `total input[type=file] in DOM: ${allFileInputs.length}`);
+        allFileInputs.slice(0, 10).forEach((inp, i) => {
+          const r = inp.getBoundingClientRect();
+          const cs = window.getComputedStyle(inp);
+          log(`P2.input.${i}`, 'INFO',
+            `accept='${inp.accept || ''}' multiple=${inp.multiple} name='${inp.name || ''}' ` +
+            `rect=(${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}) ` +
+            `display='${cs.display}' visibility='${cs.visibility}' opacity='${cs.opacity}' ` +
+            `parent=${inp.parentElement?.tagName}.${(inp.parentElement?.className || '').toString().slice(0,40)}`);
+        });
+
+        // 2. Find 匯入 button/box
+        const allBtns = Array.from(document.querySelectorAll('button, div[role=button], [class*=upload], [class*=import]'));
+        const uploadBoxes = allBtns.filter(b => {
+          const txt = (b.innerText || '').trim();
+          return txt === '匯入' || txt.includes('匯入') || txt.startsWith('上傳');
+        });
+        log('P2.upload_box_candidates', 'INFO', `候選 匯入 elements: ${uploadBoxes.length}`);
+
+        uploadBoxes.slice(0, 5).forEach((b, i) => {
+          const r = b.getBoundingClientRect();
+          log(`P2.box.${i}`, 'INFO',
+            `tag=${b.tagName} text='${(b.innerText || '').trim().slice(0,40)}' ` +
+            `rect=(${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}) ` +
+            `class='${(b.className || '').toString().slice(0,80)}'`);
+          log(`P2.box.${i}.outerHTML`, 'INFO', b.outerHTML.slice(0, 500));
+        });
+
+        // 3. Store first valid box for P3 hover recon
+        const primaryBox = uploadBoxes[0] || null;
+        window.__uboxPrimary = primaryBox;
+        if (primaryBox) {
+          log('P2.primary', 'OK', `selected box ${primaryBox.tagName}.${(primaryBox.className || '').toString().slice(0,30)} for P3 hover test`);
+        } else {
+          log('P2.primary', 'FAIL', 'NO_UPLOAD_BOX_FOUND in DOM · panel may not be loaded');
+        }
+
+        // 4. Custom upload-related globals
+        const tvKeys = Object.keys(window).filter(k => /topview|upload|asset/i.test(k));
+        log('P2.window_keys', 'INFO', `topview/upload-related window keys: [${tvKeys.slice(0,10).join(', ')}]`);
+
+        // 5. Check React fiber for handler details (if accessible)
+        if (primaryBox) {
+          const fiberKey = Object.keys(primaryBox).find(k => k.startsWith('__reactProps$') || k.startsWith('__reactFiber$'));
+          if (fiberKey) {
+            const fiber = primaryBox[fiberKey];
+            const propKeys = fiber ? Object.keys(fiber).slice(0, 20) : [];
+            log('P2.react_fiber', 'INFO', `fiber found · keys: [${propKeys.join(', ')}]`);
+          } else {
+            log('P2.react_fiber', 'INFO', 'no React fiber on box element directly');
+          }
+        }
+
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P3 · Hover the 匯入 box · see what sub-icons / overlays appear
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__uboxLog.push({ phase: p, status: s, detail: d });
+        const box = window.__uboxPrimary;
+        if (!box) { log('P3.0', 'SKIP', 'no primary box to hover'); return { ok: false }; }
+
+        const r = box.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+
+        // Pre-hover snapshot: count descendants
+        const preDescendants = box.querySelectorAll('*').length;
+        log('P3.pre_hover', 'INFO', `pre-hover descendant count: ${preDescendants}`);
+
+        // Dispatch hover
+        ['pointerover','pointerenter'].forEach(t => box.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+        ['mouseover','mouseenter'].forEach(t => box.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+        await new Promise(r => setTimeout(r, 1200));
+        log('P3.1', 'OK', `hover dispatched on box · cx=${Math.round(cx)} cy=${Math.round(cy)}`);
+
+        // Post-hover snapshot
+        const postDescendants = box.querySelectorAll('*').length;
+        log('P3.post_hover', 'INFO', `post-hover descendant count: ${postDescendants} (delta=${postDescendants - preDescendants})`);
+
+        // Find newly visible interactive elements within box
+        const interactives = Array.from(box.querySelectorAll('button, [role=button], svg, input, a, [class*=icon]'));
+        log('P3.interactive_count', 'INFO', `interactive descendants in box: ${interactives.length}`);
+        interactives.slice(0, 20).forEach((el, i) => {
+          const er = el.getBoundingClientRect();
+          const cs = window.getComputedStyle(el);
+          const visible = er.width > 0 && er.height > 0 && cs.opacity !== '0' && cs.visibility !== 'hidden' && cs.display !== 'none';
+          const aria = el.getAttribute('aria-label') || '';
+          const title = el.getAttribute('title') || '';
+          const txt = (el.innerText || '').slice(0, 30);
+          log(`P3.icon.${i}`, visible ? 'VIS' : 'HID',
+            `${el.tagName}.${(el.className+'').toString().slice(0,40)} ` +
+            `rect=(${Math.round(er.left)},${Math.round(er.top)} ${Math.round(er.width)}x${Math.round(er.height)}) ` +
+            `aria='${aria}' title='${title}' text='${txt}'`);
+        });
+
+        // Check for newly-created input[type=file] AFTER hover (some UIs lazy-render)
+        const postFileInputs = Array.from(document.querySelectorAll('input[type=file]'));
+        log('P3.input_file_after_hover', 'INFO', `total input[type=file] AFTER hover: ${postFileInputs.length}`);
+
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P4 · Check for drag-drop handlers on box + document-level
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__uboxLog.push({ phase: p, status: s, detail: d });
+        const box = window.__uboxPrimary;
+        if (!box) { log('P4.0', 'SKIP', 'no box'); return { ok: false }; }
+
+        // Simulate drag-over event · see if box reacts (e.g. shows drop-zone overlay)
+        const r = box.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+
+        const dtBefore = box.getBoundingClientRect().toJSON ? box.getBoundingClientRect().toJSON() : { width: r.width, height: r.height };
+
+        // Dispatch dragover (synthetic · no actual files)
+        const dragEvent = new DragEvent('dragover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy });
+        const handled = !box.dispatchEvent(dragEvent);  // returns false if preventDefault'd
+        log('P4.dragover', 'INFO', `dragover event dispatched · preventDefault'd=${handled} (true means box has dragover handler)`);
+
+        await new Promise(r => setTimeout(r, 500));
+
+        // Check if any new drop-zone overlay appeared anywhere
+        const overlays = Array.from(document.querySelectorAll('[class*=drop],[class*=drag],[class*=zone]'));
+        log('P4.drop_zone_elements', 'INFO', `drop/drag/zone class elements in DOM: ${overlays.length}`);
+        overlays.slice(0, 5).forEach((o, i) => {
+          const or = o.getBoundingClientRect();
+          const cs = window.getComputedStyle(o);
+          const visible = or.width > 0 && or.height > 0 && cs.opacity !== '0' && cs.visibility !== 'hidden' && cs.display !== 'none';
+          log(`P4.zone.${i}`, visible ? 'VIS' : 'HID',
+            `${o.tagName}.${(o.className||'').toString().slice(0,60)} rect=${Math.round(or.left)},${Math.round(or.top)} ${Math.round(or.width)}x${Math.round(or.height)}`);
+        });
+
+        // Dispatch dragleave to clean up
+        box.dispatchEvent(new DragEvent('dragleave', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+
+        log('P4.done', 'OK', 'drag-drop recon complete');
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P5 · Screenshot for visual reference
+  # ===========================================================================
+  - cdp:
+      method: Page.captureScreenshot
+      params:
+        format: png
+        quality: 85
+    saveTo: screenshot
+
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__uboxLog.push({ phase: p, status: s, detail: d });
+        log('P5.screenshot', 'OK', 'CDP screenshot captured');
+        log('END', 'DONE', `__uboxLog total entries: ${window.__uboxLog.length}`);
+        return window.__uboxLog;
+      })()
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

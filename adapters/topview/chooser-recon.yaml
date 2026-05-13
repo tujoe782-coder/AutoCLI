@@ -1,0 +1,140 @@
+# S326 chooser-recon · Topview chooser overlay full asset src URL dump (signed cloudfront URLs)
+#
+# Purpose: Open the chooser overlay (via 影片 → 全參考 SEEDANCE2 → 匯入 → 看板 → 圖片)
+#          and dump full image src URLs (with cloudfront Policy + Signature) for each asset.
+#          Used to download thumbnails for visual identification (uuid → known character/scene name).
+#
+# Read-only · no click on assets · no slot bind · 0 cr.
+#
+# Output: __reconLog with one entry per asset: phase='ASSET.N' detail='uuid=<path> src=<full_signed_url>'
+#
+# License: Apache-2.0
+
+site: topview
+name: chooser-recon
+description: Open Topview chooser overlay + dump full image src URLs · read-only · 0 cr
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 90
+
+args: {}
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ===========================================================================
+  # P1 · Switch to AI影片 → 全參考 SEEDANCE2 panel
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        window.__reconLog = [];
+        const log = (p, s, d) => window.__reconLog.push({ phase: p, status: s, detail: d });
+
+        const mkPointerSeq = async (el) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+          el.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(new PointerEvent('pointerenter', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseover'));
+          el.dispatchEvent(mk('mouseenter'));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mousedown'));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+          el.dispatchEvent(mk('mouseup'));
+          el.dispatchEvent(mk('click'));
+          if (typeof el.click === 'function') el.click();
+        };
+        window.__mkClick = mkPointerSeq;
+
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1', 'FAIL', 'VIDEO_BTN_NOT_FOUND'); return { ok: false }; }
+        await mkPointerSeq(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1.1', 'OK', '影片 panel opened');
+
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1.2', 'FAIL', 'SEEDANCE_BTN_NOT_FOUND'); return { ok: false }; }
+        await mkPointerSeq(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1.2', 'OK', 'SEEDANCE2 panel opened');
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P2 · Open chooser via verbatim CDP coords (S320 lock)
+  # ===========================================================================
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseMoved, x: 128, y: 287, button: none, buttons: 0, clickCount: 0 }
+  - wait: 2
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseMoved, x: 117, y: 315, button: none, buttons: 0, clickCount: 0 }
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mousePressed, x: 117, y: 315, button: left, buttons: 1, clickCount: 1 }
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseReleased, x: 117, y: 315, button: left, buttons: 1, clickCount: 1 }
+  - wait: 1
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mousePressed, x: 137, y: 220, button: left, buttons: 1, clickCount: 1 }
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseReleased, x: 137, y: 220, button: left, buttons: 1, clickCount: 1 }
+  - wait: 2
+
+  # ===========================================================================
+  # P3 · Locate chooser overlay assets · dump full signed src URLs
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__reconLog.push({ phase: p, status: s, detail: d });
+
+        // Locate all chooser asset images (cloudfront-signed URLs with Key-Pair-Id)
+        const allImgs = Array.from(document.querySelectorAll('img'));
+        const assetImgs = allImgs.filter(im => {
+          const s = im.getAttribute('src') || '';
+          return s.includes('Key-Pair-Id') && (s.includes('upload/') || s.includes('aigc'));
+        });
+
+        // Sort by visual position (top → bottom, left → right)
+        assetImgs.sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          const rowA = Math.floor(ra.top / 30) * 30;
+          const rowB = Math.floor(rb.top / 30) * 30;
+          if (rowA !== rowB) return rowA - rowB;
+          return ra.left - rb.left;
+        });
+
+        log('P3.total', 'OK', `chooser assets found: ${assetImgs.length}`);
+
+        // Dump full signed src for each
+        assetImgs.forEach((im, i) => {
+          const br = im.getBoundingClientRect();
+          const cx = Math.round(br.left + br.width / 2);
+          const cy = Math.round(br.top + br.height / 2);
+          const fullSrc = im.getAttribute('src') || '';
+          // Extract uuid path tail (before ?)
+          const uuidPath = fullSrc.split('/').slice(-2).join('/').split('?')[0];
+          log(`ASSET.${i}`, 'OK',
+            `idx=${i} coord=(${cx},${cy}) uuid_path=${uuidPath} full_src=${fullSrc}`);
+        });
+
+        log('END', 'DONE', `enumerated=${assetImgs.length}`);
+        return window.__reconLog;
+      })()
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}
