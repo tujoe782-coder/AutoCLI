@@ -638,14 +638,36 @@ pipeline:
       })()
   - wait: 1
 
-  # P3.2 "@" trigger chip 1
+  # P3.2 "@" trigger chip 1 · S327 G3 fix
+  # OLD: Input.insertText bypassed keystroke pipeline · React @ autocomplete didn't open popover
+  # NEW: Input.dispatchKeyEvent keyDown+keyUp with text="@" · fires real keydown event +
+  #      auto char insertion · React popover renders · default Image1 highlighted.
+  # PoC verified 2026-05-13 (S327 G2): OS-level keystroke @ → popover · CDP keyDown @ equivalent.
+  # NOTE: do NOT pass `unmodifiedText: "2"` here — CdpStep render_value auto-coerces "2" → int
+  #       and CDP rejects with HTTP 422 "string value expected". `text: "@"` alone suffices
+  #       since unmodifiedText is CDP-optional (informational).
   - cdp:
-      method: Input.insertText
+      method: Input.dispatchKeyEvent
       params:
+        type: keyDown
+        key: "@"
+        code: Digit2
+        modifiers: 8
         text: "@"
+        windowsVirtualKeyCode: 50
+        nativeVirtualKeyCode: 50
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params:
+        type: keyUp
+        key: "@"
+        code: Digit2
+        modifiers: 8
+        windowsVirtualKeyCode: 50
+        nativeVirtualKeyCode: 50
   - wait: 1
 
-  # P3.3 Enter selects @Image1
+  # P3.3 Enter selects @Image1 (default highlight)
   - cdp:
       method: Input.dispatchKeyEvent
       params:
@@ -687,11 +709,26 @@ pipeline:
       })()
   - wait: 1
 
-  # P3.5 "@" trigger chip 2
+  # P3.5 "@" trigger chip 2 · S327 G3 fix (see P3.2 reason · same unmodifiedText drop)
   - cdp:
-      method: Input.insertText
+      method: Input.dispatchKeyEvent
       params:
+        type: keyDown
+        key: "@"
+        code: Digit2
+        modifiers: 8
         text: "@"
+        windowsVirtualKeyCode: 50
+        nativeVirtualKeyCode: 50
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params:
+        type: keyUp
+        key: "@"
+        code: Digit2
+        modifiers: 8
+        windowsVirtualKeyCode: 50
+        nativeVirtualKeyCode: 50
   - wait: 1
 
   # P3.6 ArrowDown to @Image2
@@ -755,7 +792,14 @@ pipeline:
       })()
   - wait: 1
 
-  # P3.9 verify chip binding (both @Image1 + @Image2)
+  # P3.9 verify chip binding (S327 G3 fix · reframe of marker)
+  # PRIOR (broken false-positive): counted span.text-cyan-400 + regex /@Image\d+/ in text
+  #   → cyan-400 is the chip-slot bottom-label, NOT the bound mention chip
+  #   → literal regex matched plain text "@Image1" which IS what synthetic execCommand wrote (not bound)
+  # NOW (S327 PoC verified · 2026-05-13): bound mention chip =
+  #   span[contenteditable=false][data-image-tag="@ImageN"] · class bg-teal-600/30 text-teal-300
+  #   containing <img src="blob:..."> + nested <span>@ImageN</span>
+  # ship/codify: feedback_autocli_topview_chip_binding.md §14
   - evaluate: |
       (async () => {
         const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
@@ -763,20 +807,17 @@ pipeline:
         if (!editable) { log('P3.9', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniChipOk = false; return { ok: false }; }
 
         const text = (editable.innerText || '');
-        const chips = Array.from(editable.querySelectorAll('span, div, a, button')).filter(el => {
-          const cls = ((el.className || '') + '').toString();
-          const txt = (el.innerText || '').trim();
-          return (/mention|chip|tag|reference|asset-ref/i.test(cls) && txt.length < 30)
-              || /^@?Image\s*\d+$/.test(txt);
-        });
-        const literal1 = /@\s*Image\s*1/.test(text);
-        const literal2 = /@\s*Image\s*2/.test(text);
-        const chipOk = chips.length >= 2 || (literal1 && literal2);
+        const mentions = Array.from(editable.querySelectorAll('[data-image-tag]'));
+        const tags = mentions.map(m => m.getAttribute('data-image-tag'));
+        const expectedTags = ['@Image1', '@Image2'];
+        const tagsMatch = tags.length === expectedTags.length
+                       && expectedTags.every((t, i) => tags[i] === t);
+        const chipOk = tagsMatch;
         window.__omniChipOk = chipOk;
 
         log('P3.9', chipOk ? 'OK' : 'FAIL',
-          `text_len=${text.length} chips=${chips.length} literals=[${literal1?1:0},${literal2?1:0}] preview='${text.slice(0,100).replace(/\n/g,'|')}'`);
-        return { ok: chipOk };
+          `mentions=${mentions.length}/2 tags=${JSON.stringify(tags)} expected=${JSON.stringify(expectedTags)} text_len=${text.length} preview='${text.slice(0,100).replace(/\n/g,'|')}'`);
+        return { ok: chipOk, mentions_count: mentions.length, mention_tags: tags };
       })()
 
   # ===========================================================================
