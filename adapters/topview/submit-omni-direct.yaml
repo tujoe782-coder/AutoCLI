@@ -541,6 +541,39 @@ pipeline:
   # ───────────────────────────────────────────────────────────────────────────
   - wait: 5
 
+  # S329 fix · OVERRIDE hidden input.click() to no-op BEFORE upload-file-trusted
+  # Topview React onClick handler calls hiddenInput.click() to open file picker.
+  # Chrome 147 setInterceptFileChooserDialog suppression broke · picker leaks · blocks subsequent
+  # CDP click 生成. Override = prevent picker from opening in first place. setFileInputFiles
+  # (called by extension after the trusted click) still works · React onChange fires · chip renders.
+  # See `s329-cowork-brief-path-a-regression.md` § Picker leak root cause.
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        if (!fi) {
+          log('P2.click-override.pre', 'WARN', 'no input[type=file] found · cannot override · upload may still trigger picker');
+          return { ok: false };
+        }
+        window.__omniInputClickOrig = fi.click.bind(fi);
+        fi.click = function() {
+          window.__omniLog.push({ phase: 'P2.input.click-blocked', status: 'INFO', detail: 'S329 · blocked native picker trigger · scheduling cancel event' });
+          // S329+ · dispatch cancel event after microtask so React onClick handler completes first
+          // This simulates user clicking "取消" on the file picker · releasing React's
+          // fileChooser-waiting internal state lock
+          queueMicrotask(() => {
+            try {
+              fi.dispatchEvent(new Event('cancel', { bubbles: true, cancelable: true }));
+              window.__omniLog.push({ phase: 'P2.input.cancel-dispatched', status: 'INFO', detail: 'synthetic cancel event fired on fi · simulating user dismiss' });
+            } catch (e) {
+              window.__omniLog.push({ phase: 'P2.input.cancel-dispatched', status: 'WARN', detail: 'cancel dispatch failed: ' + e.message });
+            }
+          });
+        };
+        log('P2.click-override.pre', 'OK', 'fi.click() overridden to no-op + cancel event · picker should NOT open · React state should release');
+        return { ok: true };
+      })()
+
   - upload-file-trusted:
       selector: 'button.border-dashed:has(svg.lucide-upload)'   # 視覺 button trusted-click
       input_selector: 'input[type=file]'                          # hidden file input setFileInputFiles
@@ -549,6 +582,20 @@ pipeline:
         - "${{ args.file_path_2 }}"
 
   - wait: 4
+
+  # S329 fix · RESTORE input.click() after upload-file-trusted done
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        if (fi && window.__omniInputClickOrig) {
+          fi.click = window.__omniInputClickOrig;
+          log('P2.click-override.post', 'OK', 'fi.click() restored to native');
+        } else {
+          log('P2.click-override.post', 'WARN', `restore skipped · fi=${!!fi} orig=${!!window.__omniInputClickOrig}`);
+        }
+        return { ok: true };
+      })()
 
   # P2.verify · 檢真實 React-rendered chip (parent-scoped + cyan label · 不再被 false positive 干擾)
   - evaluate: |
@@ -878,8 +925,39 @@ pipeline:
         if (!window.__omniPriorityActive) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'priority not confirmed P1.5.3'); return { x: 0, y: 0, skip: true }; }
 
         window.__omniAbortClickGuard = false;
-        log('P4.2.pre', 'OK', `pre-submit checks PASS · gen btn=(${window.__omniGenBtnX},${window.__omniGenBtnY}) cost=${window.__omniCost}`);
-        return { x: window.__omniGenBtnX, y: window.__omniGenBtnY };
+
+        // S329 diagnostic · re-read gen btn FRESH at fire-time + elementFromPoint check
+        // Goal: disambiguate between (A) click hits gen btn but submit fails silently
+        // vs (B) click hits wrong element due to coord drift / overlay
+        const staleX = window.__omniGenBtnX, staleY = window.__omniGenBtnY;
+        // Settle 2 frames for any pending React render to complete
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const buttons2 = Array.from(document.querySelectorAll('button'));
+        const genBtnFresh = buttons2.find(b => {
+          const t = (b.innerText || '').trim();
+          return /^生成/.test(t) && !t.includes('快速');
+        });
+        let freshX = staleX, freshY = staleY;
+        let freshGenText = 'MISSING';
+        let elFromPointInfo = 'no-fresh-btn';
+        if (genBtnFresh) {
+          const gr = genBtnFresh.getBoundingClientRect();
+          freshX = Math.round(gr.left + gr.width / 2);
+          freshY = Math.round(gr.top + gr.height / 2);
+          freshGenText = (genBtnFresh.innerText || '').trim().replace(/\n/g, ' ').slice(0, 20);
+          const elAt = document.elementFromPoint(freshX, freshY);
+          const elAtIsGen = elAt && (elAt === genBtnFresh || genBtnFresh.contains(elAt) || elAt.contains(genBtnFresh));
+          elFromPointInfo = elAt ? `${elAt.tagName}.${(elAt.className || '').toString().slice(0, 40)}txt='${(elAt.innerText || '').trim().slice(0, 20)}' isGen=${elAtIsGen}` : 'NULL';
+        }
+        const drift = Math.hypot(freshX - staleX, freshY - staleY);
+        // Update window vars to fresh values (used by downstream CDP)
+        window.__omniGenBtnX = freshX;
+        window.__omniGenBtnY = freshY;
+
+        log('P4.2.pre.diag', 'INFO',
+          `stale=(${staleX},${staleY}) fresh=(${freshX},${freshY}) drift=${drift.toFixed(1)}px genText='${freshGenText}' elAt=${elFromPointInfo} scrollY=${window.scrollY}`);
+        log('P4.2.pre', 'OK', `pre-submit checks PASS · gen btn=(${freshX},${freshY}) cost=${window.__omniCost}`);
+        return { x: freshX, y: freshY };
       })()
 
   - cdp:
@@ -923,7 +1001,40 @@ pipeline:
         buttons: 0
         clickCount: 1
 
-  - wait: 5
+  # S329 fix · wait for "任務提交成功" toast or "已成功建立 N 個任務" string · poll up to 20s
+  # If toast appears within window · backend ack confirmed · board will +1 shortly
+  # If not after 20s · likely submit didn't fire (or extreme backend lag)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const start = Date.now();
+        let seen = false;
+        let seenAt = 0;
+        let seenText = '';
+        // Poll up to 20s for the success toast string
+        for (let i = 0; i < 40; i++) {
+          const all = (document.body && document.body.innerText) || '';
+          if (/任務提交成功|已成功建立\s*\d+\s*個任務|提交成功|Generation\s+started|Successfully\s+(submitted|created)/i.test(all)) {
+            seen = true;
+            seenAt = Date.now() - start;
+            // Extract the matching toast text
+            const els = Array.from(document.querySelectorAll('*')).filter(e => {
+              const t = (e.textContent || '').trim();
+              return /任務提交成功|已成功建立\s*\d+\s*個任務/.test(t) && t.length < 100 && e.children.length < 5;
+            });
+            seenText = els[0] ? (els[0].textContent || '').trim().slice(0, 60) : '<found via body text>';
+            break;
+          }
+          await new Promise(r => setTimeout(r, 500));
+        }
+        log('P4.2.5.toast-wait', seen ? 'OK' : 'WARN',
+          seen ? `success toast detected at +${seenAt}ms · text='${seenText}'`
+               : `NO success toast in 20s · submit likely failed silent`);
+        window.__omniSubmitToastSeen = seen;
+        return { ok: seen, seen_at_ms: seenAt, text: seenText };
+      })()
+
+  - wait: 3
 
   # P4.3 post-submit verify
   - evaluate: |
