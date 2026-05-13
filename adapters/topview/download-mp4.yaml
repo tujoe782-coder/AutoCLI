@@ -1,0 +1,167 @@
+# S324 download-mp4 · Topview generated mp4 download via web UI click
+#
+# Goal: Click the lucide-download icon on a Topview task card · browser saves mp4 to ~/Downloads
+#
+# Args:
+#   task_id (optional · default 'latest') · 32-hex task-id OR 'latest' = first video task card (newest)
+#   poll_max_seconds (optional · default 600) · max wait for render to complete (rendering tasks have no download icon)
+#   poll_interval_seconds (optional · default 15) · poll period
+#
+# Output: clicked = true · target_task_id + customName (Topview auto-generated label) for downstream rename
+#
+# Note: After click · Chrome saves to ~/Downloads (or Main Chrome's configured Downloads dir).
+#       Caller (bash wrapper or Neo) is responsible for mv from ~/Downloads to target path.
+#
+# Tested on: S323 Test 2 sheet1.6-b18b mp4 (still on queue · downloadable as test target)
+#
+# License: Apache-2.0 (same as parent autocli repo)
+
+site: topview
+name: download-mp4
+description: Click download icon on Topview task card · wait for render complete · save mp4 to ~/Downloads
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 1200
+
+args:
+  task_id:
+    type: string
+    description: 32-hex task_id OR 'latest' (default · first video task card)
+  poll_max_seconds:
+    type: string
+    description: max poll wait for render complete · default 600
+  poll_interval_seconds:
+    type: string
+    description: poll interval seconds · default 15
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ===========================================================================
+  # P1 · locate target task card · poll for render complete (download icon present)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        window.__dlLog = [];
+        const log = (p, s, d) => window.__dlLog.push({ phase: p, status: s, detail: d });
+
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+          log('P0.CF', 'FAIL', 'CLOUDFLARE_BLOCKED');
+          return { ok: false };
+        }
+
+        const taskIdRaw = String('${{ args.task_id }}' || 'latest').trim();
+        const taskId = taskIdRaw === '' ? 'latest' : taskIdRaw;
+        const pollMax = parseInt(String('${{ args.poll_max_seconds }}' || '600')) || 600;
+        const pollInt = parseInt(String('${{ args.poll_interval_seconds }}' || '15')) || 15;
+
+        log('P1.0', 'OK', `task_id=${taskId} pollMax=${pollMax}s pollInt=${pollInt}s url='${location.pathname}'`);
+
+        const findCard = () => {
+          if (taskId === 'latest') {
+            return document.querySelector('[data-task-card][data-media-type="video"]');
+          }
+          return document.querySelector(`[data-task-card][data-task-id="${taskId}"]`);
+        };
+
+        const startTs = Date.now();
+        let iter = 0;
+        let targetCard = null;
+        while ((Date.now() - startTs) / 1000 < pollMax) {
+          iter++;
+          targetCard = findCard();
+          if (targetCard) {
+            const video = targetCard.querySelector('video');
+            const poster = (video && video.getAttribute('poster')) || '';
+            const src = (video && video.src) || '';
+            const dlSvg = targetCard.querySelector('svg.lucide-download');
+            const dlBtn = dlSvg ? dlSvg.closest('button') : null;
+            const hasPoster = poster.includes('cloudfront') || poster.includes('aigc');
+            const hasSrc = src.includes('cloudfront') || src.includes('aigc');
+            const hasDl = !!dlBtn;
+            const dlRect = dlBtn ? dlBtn.getBoundingClientRect() : null;
+            const dlVisible = dlRect && dlRect.width > 0 && dlRect.height > 0;
+            log('P1.poll.' + iter, dlVisible ? 'READY' : 'WAIT',
+              `taskId=${(targetCard.getAttribute('data-task-id')||'?').slice(0,8)} hasPoster=${hasPoster} hasSrc=${hasSrc} hasDl=${hasDl} dlVis=${dlVisible} elapsed=${Math.round((Date.now()-startTs)/1000)}s`);
+            if (dlVisible) break;
+          } else {
+            log('P1.poll.' + iter, 'NO_CARD', `task_id=${taskId.slice(0,12)} not found · elapsed=${Math.round((Date.now()-startTs)/1000)}s`);
+          }
+          await new Promise(r => setTimeout(r, pollInt * 1000));
+        }
+
+        targetCard = findCard();
+        if (!targetCard) { log('P1.X', 'FAIL', 'CARD_NOT_FOUND'); return { ok: false }; }
+        const finalDl = targetCard.querySelector('svg.lucide-download');
+        const finalDlBtn = finalDl ? finalDl.closest('button') : null;
+        if (!finalDlBtn) { log('P1.X', 'FAIL', `DL_BUTTON_NOT_FOUND · task may still be rendering · iter=${iter}`); return { ok: false }; }
+        const finalDlRect = finalDlBtn.getBoundingClientRect();
+        if (!(finalDlRect.width > 0 && finalDlRect.height > 0)) {
+          log('P1.X', 'FAIL', `DL_BUTTON_NOT_VISIBLE · rect=(${finalDlRect.width}x${finalDlRect.height})`); return { ok: false };
+        }
+
+        window.__targetCard = targetCard;
+        window.__targetDlBtn = finalDlBtn;
+        const actualTaskId = targetCard.getAttribute('data-task-id');
+        log('P1.OK', 'READY', `target_task_id=${actualTaskId} dl_rect=(${Math.round(finalDlRect.left)},${Math.round(finalDlRect.top)} ${Math.round(finalDlRect.width)}x${Math.round(finalDlRect.height)}) elapsed_total=${Math.round((Date.now()-startTs)/1000)}s`);
+        return { ok: true, taskId: actualTaskId };
+      })()
+
+  # ===========================================================================
+  # P2 · click download icon via mkPointerSeq
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__dlLog.push({ phase: p, status: s, detail: d });
+        const card = window.__targetCard;
+        const dlBtn = window.__targetDlBtn;
+        if (!card || !dlBtn) { log('P2.0', 'FAIL', 'NO_TARGET_IN_STATE'); return { ok: false }; }
+
+        const cardText = (card.innerText || '').trim().slice(0, 200);
+        const nameMatch = cardText.match(/\d{6}_\d{4}_[a-zA-Z]+_\w+/);
+        const customName = nameMatch ? nameMatch[0] : '';
+        log('P2.1', 'INFO', `card_text_head='${cardText.slice(0,80)}' customName_detected='${customName}'`);
+
+        const cardRect = card.getBoundingClientRect();
+        const cx = cardRect.left + cardRect.width / 2, cy = cardRect.top + cardRect.height / 2;
+        ['pointerover','pointerenter'].forEach(t => card.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+        ['mouseover','mouseenter'].forEach(t => card.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+        await new Promise(r => setTimeout(r, 400));
+
+        const r = dlBtn.getBoundingClientRect();
+        const bx = r.left + r.width / 2, by = r.top + r.height / 2;
+        const mk = (t) => new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:bx, clientY:by, button:0 });
+        dlBtn.dispatchEvent(new PointerEvent('pointerover', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
+        dlBtn.dispatchEvent(new PointerEvent('pointerenter', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
+        dlBtn.dispatchEvent(mk('mouseover'));
+        dlBtn.dispatchEvent(mk('mouseenter'));
+        await new Promise(r => setTimeout(r, 200));
+        dlBtn.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
+        dlBtn.dispatchEvent(mk('mousedown'));
+        dlBtn.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
+        dlBtn.dispatchEvent(mk('mouseup'));
+        dlBtn.dispatchEvent(mk('click'));
+        if (typeof dlBtn.click === 'function') dlBtn.click();
+
+        await new Promise(r => setTimeout(r, 2000));
+        log('P2.2', 'OK', `click dispatched at (${Math.round(bx)},${Math.round(by)}) · customName='${customName}'`);
+
+        return { ok: true, customName };
+      })()
+
+  - wait: 3
+
+  # ===========================================================================
+  # P3 · dump __dlLog
+  # ===========================================================================
+  - evaluate: |
+      (window.__dlLog || [{ phase: 'NONE', status: 'EMPTY', detail: 'log missing' }])
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

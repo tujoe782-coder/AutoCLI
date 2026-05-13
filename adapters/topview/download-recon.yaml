@@ -1,0 +1,174 @@
+# S324 download-recon · Topview thumbnail download icon DOM recon
+#
+# Purpose: Locate the download icon that appears on thumbnail hover (per Sunny S324 screenshot 2)
+#          so we can build download-mp4.yaml adapter.
+#
+# Flow:
+#   P1 navigate ep01-character-bank board · wait 5s lazy-load
+#   P2 locate first video thumbnail (img/video element in main content)
+#   P3 hover thumbnail · wait 1s · dump descendant buttons/svgs with rect + class + aria + text
+#   P4 try heuristic-match download icon (text/aria/title contains 'download' or '下載' or filter by 4th-icon position)
+#
+# Output:
+#   __reconLog table with full DOM dump · enough info to write download-mp4.yaml selector
+#
+# Safe: read-only · no click · no submit · no quota burn
+
+site: topview
+name: download-recon
+description: Recon Topview thumbnail hover download icon · DOM dump for S324 download-mp4 adapter build
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 120
+
+args: {}
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ===========================================================================
+  # P1 · locate first video thumbnail (latest task · S323 Test 2 mp4)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        window.__reconLog = [];
+        const log = (p, s, d) => window.__reconLog.push({ phase: p, status: s, detail: d });
+
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+          log('P0.CF', 'FAIL', 'CLOUDFLARE_BLOCKED · board not reachable');
+          return { ok: false };
+        }
+
+        log('P1.0', 'OK', `page title='${document.title}' url='${location.pathname}'`);
+
+        const videos = Array.from(document.querySelectorAll('video'));
+        const images = Array.from(document.querySelectorAll('img')).filter(im => {
+          const s = im.getAttribute('src') || '';
+          return s.includes('topview') || s.includes('cloudfront') || s.includes('s3') || s.includes('aigc') || s.includes('Key-Pair-Id');
+        });
+        log('P1.1', 'INFO', `videos.count=${videos.length} cloudfront/s3_imgs.count=${images.length}`);
+
+        let firstMedia = null;
+        if (videos.length > 0) {
+          firstMedia = videos[0];
+          log('P1.2', 'PICK', `first video src='${(firstMedia.src||'').slice(0,80)}'`);
+        } else if (images.length > 0) {
+          firstMedia = images[0];
+          log('P1.2', 'PICK', `first cdn img src='${(firstMedia.src||'').slice(0,80)}'`);
+        } else {
+          log('P1.2', 'FAIL', 'NO_MEDIA_ELEMENTS_FOUND · board may not be loaded · check selector');
+          return { ok: false };
+        }
+
+        let card = firstMedia;
+        for (let i = 0; i < 6; i++) {
+          const p = card.parentElement;
+          if (!p) break;
+          card = p;
+          const r = card.getBoundingClientRect();
+          if (r.width > 100 && r.height > 100 && r.width < 500 && r.height < 500) {
+            log('P1.3.lvl' + i, 'CARD_CANDIDATE', `lvl=${i} rect=(${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)}) tag=${card.tagName} class='${(card.className+'').toString().slice(0,60)}'`);
+          }
+          if (r.width > 500 || r.height > 500) {
+            card = card.parentElement || card;
+            break;
+          }
+        }
+
+        if (!card) { log('P1.4', 'FAIL', 'NO_CARD_RESOLVED'); return { ok: false }; }
+        window.__firstCard = card;
+        const cr = card.getBoundingClientRect();
+        log('P1.4', 'OK', `card_resolved tag=${card.tagName} rect=(${Math.round(cr.left)},${Math.round(cr.top)} ${Math.round(cr.width)}x${Math.round(cr.height)}) class='${(card.className+'').toString().slice(0,80)}'`);
+        log('P1.5', 'CARD_OUTERHTML_HEAD', card.outerHTML.slice(0, 1200));
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P2 · hover card · wait icons reveal · dump descendant buttons/svgs
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__reconLog.push({ phase: p, status: s, detail: d });
+        const card = window.__firstCard;
+        if (!card) { log('P2.0', 'FAIL', 'NO_CARD_IN_STATE'); return { ok: false }; }
+
+        const r = card.getBoundingClientRect();
+        const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+
+        ['pointerover','pointerenter'].forEach(t => card.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+        ['mouseover','mouseenter'].forEach(t => card.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+
+        const inner = card.querySelector('img, video') || card;
+        if (inner !== card) {
+          const ir = inner.getBoundingClientRect();
+          const icx = ir.left + ir.width / 2, icy = ir.top + ir.height / 2;
+          ['pointerover','pointerenter'].forEach(t => inner.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:icx, clientY:icy })));
+          ['mouseover','mouseenter'].forEach(t => inner.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:icx, clientY:icy })));
+        }
+
+        await new Promise(r => setTimeout(r, 1000));
+        log('P2.1', 'OK', `hover dispatched on card + inner media · cx=${Math.round(cx)} cy=${Math.round(cy)}`);
+
+        const all = Array.from(card.querySelectorAll('button, svg, [role=button], a, [class*=icon]'));
+        log('P2.2', 'INFO', `card descendant interactive count: ${all.length}`);
+
+        all.slice(0, 25).forEach((el, i) => {
+          const er = el.getBoundingClientRect();
+          const cs = window.getComputedStyle(el);
+          const visible = er.width > 0 && er.height > 0 && cs.opacity !== '0' && cs.visibility !== 'hidden' && cs.display !== 'none';
+          const aria = el.getAttribute('aria-label') || '';
+          const title = el.getAttribute('title') || '';
+          const dAttr = el.getAttribute('data-action') || el.getAttribute('data-icon') || el.getAttribute('data-testid') || '';
+          const txt = (el.innerText || '').slice(0, 30);
+          log('P2.it.' + i, visible ? 'VIS' : 'HID',
+            `${el.tagName}.${(el.className+'').toString().slice(0,40)} rect=(${Math.round(er.left)},${Math.round(er.top)} ${Math.round(er.width)}x${Math.round(er.height)}) aria='${aria}' title='${title}' data='${dAttr}' text='${txt}'`);
+        });
+
+        const candidates = all.filter(el => {
+          const blob = ((el.innerText||'') + (el.getAttribute('aria-label')||'') + (el.getAttribute('title')||'') + (el.getAttribute('data-action')||'') + (el.getAttribute('data-testid')||'') + (el.outerHTML||'').slice(0, 300)).toLowerCase();
+          return blob.includes('download') || blob.includes('下載') || blob.includes('下载') || blob.includes('save') || blob.includes('save-alt');
+        });
+        log('P2.dl_count', 'INFO', `download keyword match count: ${candidates.length}`);
+
+        candidates.slice(0, 6).forEach((el, i) => {
+          const er = el.getBoundingClientRect();
+          log('P2.dl.' + i, 'FOUND',
+            `${el.tagName} rect=(${Math.round(er.left)},${Math.round(er.top)} ${Math.round(er.width)}x${Math.round(er.height)}) outerHTML='${(el.outerHTML||'').slice(0, 300)}'`);
+        });
+
+        const svgs = Array.from(card.querySelectorAll('svg'));
+        log('P2.svg_count', 'INFO', `svg count in card: ${svgs.length}`);
+        svgs.slice(0, 10).forEach((s, i) => {
+          const sr = s.getBoundingClientRect();
+          const cs = window.getComputedStyle(s);
+          const visible = sr.width > 0 && sr.height > 0 && cs.opacity !== '0';
+          const pathD = (s.querySelector('path') ? (s.querySelector('path').getAttribute('d') || '').slice(0, 80) : '');
+          log('P2.svg.' + i, visible ? 'VIS' : 'HID',
+            `svg rect=(${Math.round(sr.left)},${Math.round(sr.top)} ${Math.round(sr.width)}x${Math.round(sr.height)}) parent=${(s.parentElement?.tagName || '?')+'.'+(s.parentElement?.className?.toString?.()||'').slice(0,30)} path_d_head='${pathD}'`);
+        });
+
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P3 · screenshot post-hover (saveScreenshot if step supported · fallback to embedded base64)
+  # ===========================================================================
+  - cdp:
+      method: Page.captureScreenshot
+      params:
+        format: png
+        quality: 80
+    saveTo: screenshot
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__reconLog.push({ phase: p, status: s, detail: d });
+        log('P3.0', 'OK', 'screenshot captured via CDP Page.captureScreenshot · check step output for base64');
+        log('END', 'DONE', `__reconLog total entries: ${window.__reconLog.length}`);
+        console.table(window.__reconLog);
+        return { reconLog: window.__reconLog, total: window.__reconLog.length };
+      })()
