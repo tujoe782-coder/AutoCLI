@@ -306,6 +306,45 @@ impl IPage for DaemonPage {
         self.send(cmd).await?;
         Ok(())
     }
+
+    /// S326 hermesDr fork · trusted file upload via CDP file-chooser intercept + trusted click + setFileInputFiles.
+    /// See `IPage::set_file_input_trusted` for verified-behavior docs.
+    async fn set_file_input_trusted(
+        &self,
+        button_selector: &str,
+        input_selector: &str,
+        files: Vec<String>,
+    ) -> Result<Value, CliError> {
+        if button_selector.is_empty() {
+            return Err(CliError::pipeline(
+                "set_file_input_trusted: button_selector is required (the visible button to click)",
+            ));
+        }
+        if input_selector.is_empty() {
+            return Err(CliError::pipeline(
+                "set_file_input_trusted: input_selector is required (hidden file input to set)",
+            ));
+        }
+        if files.is_empty() {
+            return Err(CliError::pipeline(
+                "set_file_input_trusted: files array is empty",
+            ));
+        }
+        for path in &files {
+            if !path.starts_with('/') {
+                return Err(CliError::pipeline(format!(
+                    "set_file_input_trusted: path must be absolute (starts with '/'), got: {path}"
+                )));
+            }
+        }
+        let cmd = self
+            .cmd("set-file-input-trusted")
+            .await
+            .with_selector(button_selector)
+            .with_input_selector(input_selector)
+            .with_files(files);
+        self.send(cmd).await
+    }
 }
 
 /// Guess MIME type from filename extension. Covers the formats Topview's upload accepts

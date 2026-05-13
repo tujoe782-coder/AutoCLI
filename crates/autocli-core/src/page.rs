@@ -222,4 +222,28 @@ pub trait IPage: Send + Sync {
             "set_file_input not supported on this IPage impl",
         ))
     }
+
+    /// S326 hermesDr fork · trusted file upload via CDP file-chooser intercept + click + setFileInputFiles.
+    ///
+    /// Verified 2026-05-13 (Chrome 147+ MV3 chrome.debugger): the canonical chain
+    /// `Page.setInterceptFileChooserDialog → Input.dispatchMouseEvent (trusted click)
+    /// → DOM.setFileInputFiles` writes input.files AND auto-fires `input` + `change`
+    /// events with `isTrusted=true`, so React onChange handlers (Topview Next.js 15
+    /// + Turbopack) accept the upload and render chip previews. This supersedes the
+    /// S321 drag-drop sim pattern (which dispatched events with isTrusted=false and
+    /// failed silently when React handlers gated on isTrusted).
+    ///
+    /// `button_selector` — the visible button users would click to open the picker (e.g. `button.border-dashed:has(svg.lucide-upload)`).
+    /// `input_selector` — the hidden `<input type="file">` whose files should be set (e.g. `input[type="file"]`).
+    /// `files` — ABSOLUTE paths reachable by the Chrome process.
+    async fn set_file_input_trusted(
+        &self,
+        _button_selector: &str,
+        _input_selector: &str,
+        _files: Vec<String>,
+    ) -> Result<Value, CliError> {
+        Err(CliError::pipeline(
+            "set_file_input_trusted not supported on this IPage impl",
+        ))
+    }
 }

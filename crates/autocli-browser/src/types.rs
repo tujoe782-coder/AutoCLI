@@ -24,9 +24,14 @@ pub struct DaemonCommand {
     /// File paths for 'set-file-input' action (kept for logging / debugging — actual transfer goes via fileBlobs)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<String>>,
-    /// Selector for 'set-file-input' action — drop-zone element (defaults to 'input[type="file"]' on extension side)
+    /// Selector for 'set-file-input' action — drop-zone element (defaults to 'input[type="file"]' on extension side).
+    /// For 'set-file-input-trusted' action (S326) this is the visible BUTTON to trusted-click (e.g. "button.border-dashed:has(svg.lucide-upload)").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selector: Option<String>,
+    /// Hidden `<input type="file">` selector for 'set-file-input-trusted' action (S326).
+    /// Distinct from `selector` (which carries the button for the trusted variant).
+    #[serde(skip_serializing_if = "Option::is_none", rename = "inputSelector")]
+    pub input_selector: Option<String>,
     /// Inline file contents (base64) for 'set-file-input' action (S321 gh#34 · drag-drop pattern).
     /// Carries file bytes through to the page since CDP DOM.setFileInputFiles is silently no-op'd
     /// from MV3 chrome.debugger context — we bypass the file chooser entirely and dispatch
@@ -63,6 +68,7 @@ impl DaemonCommand {
             cdp_params: None,
             files: None,
             selector: None,
+            input_selector: None,
             file_blobs: None,
             domain: None,
         }
@@ -114,6 +120,12 @@ impl DaemonCommand {
     /// hermesDr fork: set selector for 'set-file-input' action.
     pub fn with_selector(mut self, selector: impl Into<String>) -> Self {
         self.selector = Some(selector.into());
+        self
+    }
+
+    /// S326 hermesDr fork: set hidden file input selector for 'set-file-input-trusted' action.
+    pub fn with_input_selector(mut self, selector: impl Into<String>) -> Self {
+        self.input_selector = Some(selector.into());
         self
     }
 

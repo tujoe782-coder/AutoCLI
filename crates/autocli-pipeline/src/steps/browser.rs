@@ -780,6 +780,143 @@ impl StepHandler for UploadFileStep {
 }
 
 // ---------------------------------------------------------------------------
+// UploadFileTrustedStep (hermesDr fork · S326) — trusted CDP file-chooser intercept
+// + Input.dispatchMouseEvent click + DOM.setFileInputFiles. Supersedes the S321
+// drag-drop sim path for sites whose React onChange handlers gate on isTrusted.
+//
+// Verified 2026-05-13 against Topview React 19 + Next.js 15 + Turbopack: trusted
+// click pre-flight is REQUIRED (without it the React app crashes / resets); native
+// file picker is intercepted (does not pop), and DOM.setFileInputFiles
+// auto-fires `input` + `change` events with `isTrusted=true`, so React renders
+// chip previews exactly as if a human had selected the file.
+//
+// yaml usage:
+//
+//   - upload-file-trusted:
+//       selector: "button.border-dashed:has(svg.lucide-upload)"  # visible button to click
+//       input_selector: "input[type=file]"                         # hidden file input to set
+//       files:
+//         - "${{ args.file_path_1 }}"                              # ABSOLUTE paths
+//         - "${{ args.file_path_2 }}"                              # multiple=true supports N files in 1 call
+//
+// Trade-offs vs `upload-file:`:
+//   • Pro: events become trusted → works on sites that reject synthetic drops
+//   • Pro: file bytes do NOT cross daemon body limit (only path strings travel)
+//   • Pro: multi-file in 1 call (no per-file repeats)
+//   • Con: requires the visible button to be in viewport + clickable (selector + rect check)
+// ---------------------------------------------------------------------------
+
+pub struct UploadFileTrustedStep;
+
+#[async_trait]
+impl StepHandler for UploadFileTrustedStep {
+    fn name(&self) -> &'static str {
+        "upload-file-trusted"
+    }
+
+    fn is_browser_step(&self) -> bool {
+        true
+    }
+
+    async fn execute(
+        &self,
+        page: Option<Arc<dyn IPage>>,
+        params: &Value,
+        data: &Value,
+        args: &HashMap<String, Value>,
+    ) -> Result<Value, CliError> {
+        let pg = require_page(&page)?;
+        let obj = params.as_object().ok_or_else(|| {
+            CliError::pipeline(
+                "upload-file-trusted: params must be an object with 'selector', 'input_selector', and 'files'",
+            )
+        })?;
+        let ctx = default_ctx(data, args);
+
+        // button selector (REQUIRED — must trusted-click before setFileInputFiles)
+        let selector_raw = obj.get("selector").ok_or_else(|| {
+            CliError::pipeline(
+                "upload-file-trusted: missing 'selector' (visible button to click)",
+            )
+        })?;
+        let selector_str = selector_raw.as_str().ok_or_else(|| {
+            CliError::pipeline("upload-file-trusted: 'selector' must be a string")
+        })?;
+        let selector = render_template_str(selector_str, &ctx)?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if selector.is_empty() {
+            return Err(CliError::pipeline(
+                "upload-file-trusted: rendered 'selector' is empty",
+            ));
+        }
+
+        // input_selector (REQUIRED — hidden file input to set)
+        let input_selector_raw = obj.get("input_selector").ok_or_else(|| {
+            CliError::pipeline(
+                "upload-file-trusted: missing 'input_selector' (hidden file input)",
+            )
+        })?;
+        let input_selector_str = input_selector_raw.as_str().ok_or_else(|| {
+            CliError::pipeline("upload-file-trusted: 'input_selector' must be a string")
+        })?;
+        let input_selector = render_template_str(input_selector_str, &ctx)?
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        if input_selector.is_empty() {
+            return Err(CliError::pipeline(
+                "upload-file-trusted: rendered 'input_selector' is empty",
+            ));
+        }
+
+        // files (REQUIRED — array of absolute paths)
+        let files_raw = obj.get("files").ok_or_else(|| {
+            CliError::pipeline("upload-file-trusted: missing 'files' (array of absolute paths)")
+        })?;
+        let files_arr = files_raw.as_array().ok_or_else(|| {
+            CliError::pipeline("upload-file-trusted: 'files' must be an array")
+        })?;
+        if files_arr.is_empty() {
+            return Err(CliError::pipeline("upload-file-trusted: 'files' is empty"));
+        }
+        let mut files: Vec<String> = Vec::with_capacity(files_arr.len());
+        for item in files_arr {
+            let raw_str = item.as_str().ok_or_else(|| {
+                CliError::pipeline(
+                    "upload-file-trusted: each entry in 'files' must be a string path",
+                )
+            })?;
+            let rendered = render_template_str(raw_str, &ctx)?;
+            let s = rendered
+                .as_str()
+                .ok_or_else(|| {
+                    CliError::pipeline("upload-file-trusted: rendered file path is not a string")
+                })?
+                .to_string();
+            if s.is_empty() {
+                return Err(CliError::pipeline(
+                    "upload-file-trusted: rendered file path is empty",
+                ));
+            }
+            if !s.starts_with('/') {
+                return Err(CliError::pipeline(format!(
+                    "upload-file-trusted: path must be absolute (starts with '/'), got: {s}"
+                )));
+            }
+            files.push(s);
+        }
+
+        let result = pg
+            .set_file_input_trusted(&selector, &input_selector, files)
+            .await?;
+        // Pass extension's verify payload (chipsRendered, chipLabels, filesSet) as step data.
+        Ok(result)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Registration
 // ---------------------------------------------------------------------------
 
@@ -796,6 +933,7 @@ pub fn register_browser_steps(registry: &mut StepRegistry) {
     registry.register(Arc::new(CollectStep));
     registry.register(Arc::new(CdpStep));  // hermesDr fork
     registry.register(Arc::new(UploadFileStep));  // hermesDr fork (S321)
+    registry.register(Arc::new(UploadFileTrustedStep));  // hermesDr fork (S326)
 }
 
 // ---------------------------------------------------------------------------
