@@ -7,12 +7,20 @@
 #   poll_max_seconds (optional · default 600) · max wait for render to complete (rendering tasks have no download icon)
 #   poll_interval_seconds (optional · default 15) · poll period
 #
-# Output: clicked = true · target_task_id + customName (Topview auto-generated label) for downstream rename
+# Output: __dlLog table including final 'SUMMARY' entry with ok/reason/target_task_id/custom_name/clicked_at_ms.
+#
+# Reason codes (parse-friendly · wrapper script may grep these):
+#   CLOUDFLARE_BLOCKED       · CF challenge intercept · retry after Sunny passes
+#   CARD_NOT_FOUND           · poll exhausted · task_id not in DOM (or `latest` empty board)
+#   NOT_READY_TIMEOUT        · card present but never showed download icon (still rendering at poll_max)
+#   DL_BUTTON_NOT_FOUND      · card found · download svg absent (unexpected · maybe non-video)
+#   DL_BUTTON_NOT_VISIBLE    · button rect zero size (off-screen / display:none)
 #
 # Note: After click · Chrome saves to ~/Downloads (or Main Chrome's configured Downloads dir).
 #       Caller (bash wrapper or Neo) is responsible for mv from ~/Downloads to target path.
+#       yaml does NOT do fs operations (out of pipeline step scope · see brief §4.4).
 #
-# Tested on: S323 Test 2 sheet1.6-b18b mp4 (still on queue · downloadable as test target)
+# Tested on: S323 Test 2 sheet1.6-b18b mp4 (still on queue · downloadable as test target · 0 cr)
 #
 # License: Apache-2.0 (same as parent autocli repo)
 
@@ -43,15 +51,25 @@ pipeline:
 
   # ===========================================================================
   # P1 · locate target task card · poll for render complete (download icon present)
+  #      On success: stash card + dlBtn + customName into window state for P2 use.
+  #      On failure: emit reason code · subsequent steps short-circuit via window.__dlAbort.
   # ===========================================================================
   - evaluate: |
       (async () => {
+        // Reset stale state from any prior run in same page lifecycle
         window.__dlLog = [];
+        window.__dlAbort = false;
+        window.__targetCard = null;
+        window.__targetDlBtn = null;
+        window.__dlCustomName = '';
+        window.__dlReason = '';
         const log = (p, s, d) => window.__dlLog.push({ phase: p, status: s, detail: d });
 
         if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+          window.__dlAbort = true;
+          window.__dlReason = 'CLOUDFLARE_BLOCKED';
           log('P0.CF', 'FAIL', 'CLOUDFLARE_BLOCKED');
-          return { ok: false };
+          return { ok: false, reason: 'CLOUDFLARE_BLOCKED' };
         }
 
         const taskIdRaw = String('${{ args.task_id }}' || 'latest').trim();
@@ -71,10 +89,12 @@ pipeline:
         const startTs = Date.now();
         let iter = 0;
         let targetCard = null;
+        let cardEverSeen = false;
         while ((Date.now() - startTs) / 1000 < pollMax) {
           iter++;
           targetCard = findCard();
           if (targetCard) {
+            cardEverSeen = true;
             const video = targetCard.querySelector('video');
             const poster = (video && video.getAttribute('poster')) || '';
             const src = (video && video.src) || '';
@@ -95,43 +115,72 @@ pipeline:
         }
 
         targetCard = findCard();
-        if (!targetCard) { log('P1.X', 'FAIL', 'CARD_NOT_FOUND'); return { ok: false }; }
+        if (!targetCard) {
+          window.__dlAbort = true;
+          const reason = cardEverSeen ? 'NOT_READY_TIMEOUT' : 'CARD_NOT_FOUND';
+          window.__dlReason = reason;
+          log('P1.X', 'FAIL', reason);
+          return { ok: false, reason };
+        }
         const finalDl = targetCard.querySelector('svg.lucide-download');
         const finalDlBtn = finalDl ? finalDl.closest('button') : null;
-        if (!finalDlBtn) { log('P1.X', 'FAIL', `DL_BUTTON_NOT_FOUND · task may still be rendering · iter=${iter}`); return { ok: false }; }
+        if (!finalDlBtn) {
+          window.__dlAbort = true;
+          window.__dlReason = 'DL_BUTTON_NOT_FOUND';
+          log('P1.X', 'FAIL', `DL_BUTTON_NOT_FOUND · task may still be rendering · iter=${iter}`);
+          return { ok: false, reason: 'DL_BUTTON_NOT_FOUND' };
+        }
         const finalDlRect = finalDlBtn.getBoundingClientRect();
         if (!(finalDlRect.width > 0 && finalDlRect.height > 0)) {
-          log('P1.X', 'FAIL', `DL_BUTTON_NOT_VISIBLE · rect=(${finalDlRect.width}x${finalDlRect.height})`); return { ok: false };
+          window.__dlAbort = true;
+          window.__dlReason = 'DL_BUTTON_NOT_VISIBLE';
+          log('P1.X', 'FAIL', `DL_BUTTON_NOT_VISIBLE · rect=(${finalDlRect.width}x${finalDlRect.height})`);
+          return { ok: false, reason: 'DL_BUTTON_NOT_VISIBLE' };
         }
+
+        // Extract customName eagerly (card text static post-render · before click disrupts modal/scroll)
+        const cardText = (targetCard.innerText || '').trim();
+        const nameMatch = cardText.match(/\d{6}_\d{4}_[a-zA-Z]+_\w+/);
+        const customName = nameMatch ? nameMatch[0] : '';
+        window.__dlCustomName = customName;
 
         window.__targetCard = targetCard;
         window.__targetDlBtn = finalDlBtn;
         const actualTaskId = targetCard.getAttribute('data-task-id');
-        log('P1.OK', 'READY', `target_task_id=${actualTaskId} dl_rect=(${Math.round(finalDlRect.left)},${Math.round(finalDlRect.top)} ${Math.round(finalDlRect.width)}x${Math.round(finalDlRect.height)}) elapsed_total=${Math.round((Date.now()-startTs)/1000)}s`);
-        return { ok: true, taskId: actualTaskId };
+        window.__dlTargetTaskId = actualTaskId;
+        log('P1.OK', 'READY', `target_task_id=${actualTaskId} customName='${customName}' dl_rect=(${Math.round(finalDlRect.left)},${Math.round(finalDlRect.top)} ${Math.round(finalDlRect.width)}x${Math.round(finalDlRect.height)}) elapsed_total=${Math.round((Date.now()-startTs)/1000)}s`);
+        return { ok: true, taskId: actualTaskId, customName };
       })()
 
   # ===========================================================================
-  # P2 · click download icon via mkPointerSeq
+  # P2 · click download icon via mkPointerSeq (hover-precede card · then click button)
   # ===========================================================================
   - evaluate: |
       (async () => {
         const log = (p, s, d) => window.__dlLog.push({ phase: p, status: s, detail: d });
+        if (window.__dlAbort) {
+          log('P2.0', 'SKIP', `aborted upstream · reason=${window.__dlReason}`);
+          return { ok: false, reason: window.__dlReason };
+        }
         const card = window.__targetCard;
         const dlBtn = window.__targetDlBtn;
-        if (!card || !dlBtn) { log('P2.0', 'FAIL', 'NO_TARGET_IN_STATE'); return { ok: false }; }
+        if (!card || !dlBtn) {
+          window.__dlAbort = true;
+          window.__dlReason = 'NO_TARGET_IN_STATE';
+          log('P2.0', 'FAIL', 'NO_TARGET_IN_STATE · P1 may have completed without stashing');
+          return { ok: false, reason: 'NO_TARGET_IN_STATE' };
+        }
 
-        const cardText = (card.innerText || '').trim().slice(0, 200);
-        const nameMatch = cardText.match(/\d{6}_\d{4}_[a-zA-Z]+_\w+/);
-        const customName = nameMatch ? nameMatch[0] : '';
-        log('P2.1', 'INFO', `card_text_head='${cardText.slice(0,80)}' customName_detected='${customName}'`);
+        log('P2.1', 'INFO', `target_task_id=${window.__dlTargetTaskId || '?'} customName='${window.__dlCustomName || ''}'`);
 
+        // Hover-precede card (5 icons appear on hover per Sunny S324 screenshot — download is icon #3)
         const cardRect = card.getBoundingClientRect();
         const cx = cardRect.left + cardRect.width / 2, cy = cardRect.top + cardRect.height / 2;
         ['pointerover','pointerenter'].forEach(t => card.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
         ['mouseover','mouseenter'].forEach(t => card.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
         await new Promise(r => setTimeout(r, 400));
 
+        // Click download button via mkPointerSeq (S320 chooser-bind pattern · trusted by Topview React)
         const r = dlBtn.getBoundingClientRect();
         const bx = r.left + r.width / 2, by = r.top + r.height / 2;
         const mk = (t) => new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:bx, clientY:by, button:0 });
@@ -147,19 +196,36 @@ pipeline:
         dlBtn.dispatchEvent(mk('click'));
         if (typeof dlBtn.click === 'function') dlBtn.click();
 
+        const clickedAtMs = Date.now();
+        window.__dlClickedAtMs = clickedAtMs;
         await new Promise(r => setTimeout(r, 2000));
-        log('P2.2', 'OK', `click dispatched at (${Math.round(bx)},${Math.round(by)}) · customName='${customName}'`);
+        log('P2.2', 'OK', `click dispatched at (${Math.round(bx)},${Math.round(by)}) · clicked_at_ms=${clickedAtMs}`);
 
-        return { ok: true, customName };
+        return { ok: true, customName: window.__dlCustomName, clicked_at_ms: clickedAtMs };
       })()
 
   - wait: 3
 
   # ===========================================================================
-  # P3 · dump __dlLog
+  # P3 · emit final SUMMARY entry + dump __dlLog
+  #      Wrapper script greps SUMMARY line for parse-friendly final state.
   # ===========================================================================
   - evaluate: |
-      (window.__dlLog || [{ phase: 'NONE', status: 'EMPTY', detail: 'log missing' }])
+      (() => {
+        const log = (p, s, d) => window.__dlLog.push({ phase: p, status: s, detail: d });
+        const ok = !window.__dlAbort;
+        const reason = window.__dlReason || (ok ? 'OK' : 'UNKNOWN');
+        const summary = {
+          ok,
+          reason,
+          target_task_id: window.__dlTargetTaskId || '',
+          custom_name: window.__dlCustomName || '',
+          clicked_at_ms: window.__dlClickedAtMs || 0,
+        };
+        log('SUMMARY', ok ? 'OK' : 'FAIL',
+          `ok=${ok} reason=${reason} target_task_id=${summary.target_task_id} custom_name='${summary.custom_name}' clicked_at_ms=${summary.clicked_at_ms}`);
+        return window.__dlLog;
+      })()
 
   - map:
       phase: ${{ item.phase }}
