@@ -1,0 +1,72 @@
+# S326 list-tasks · Topview board task card enumeration
+#
+# Purpose: Dump task_ids + media-type + customName for first N task cards
+#          (reverse-chrono · newest first). Read-only · no click · no quota.
+#
+# Args:
+#   limit (optional · default 10) · max cards to enumerate
+#
+# Output: __listLog table · entries with phase 'CARD.N' contain:
+#   detail = "idx=N task_id=<32-hex> media_type=<video|image|audio> custom_name=<text|''> rect=(x,y,wxh)"
+#
+# Use case: pre-fetch task_ids for download-mp4 adapter explicit task_id mode
+#           (avoid 'latest' filter limitation to video-only)
+#
+# License: Apache-2.0
+
+site: topview
+name: list-tasks
+description: Enumerate Topview board task cards · dump task_ids + media-type · read-only
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 60
+
+args:
+  limit:
+    type: string
+    description: max cards to enumerate · default 10
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  - evaluate: |
+      (async () => {
+        window.__listLog = [];
+        const log = (p, s, d) => window.__listLog.push({ phase: p, status: s, detail: d });
+
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) {
+          log('P0.CF', 'FAIL', 'CLOUDFLARE_BLOCKED');
+          return { ok: false, reason: 'CLOUDFLARE_BLOCKED' };
+        }
+
+        const limit = parseInt(String('${{ args.limit }}' || '10')) || 10;
+        log('P1.0', 'OK', `page='${document.title}' url='${location.pathname}' limit=${limit}`);
+
+        const cards = Array.from(document.querySelectorAll('[data-task-card]'));
+        log('P1.1', 'INFO', `total task cards in DOM: ${cards.length}`);
+
+        const slice = cards.slice(0, limit);
+        slice.forEach((c, i) => {
+          const tid = c.getAttribute('data-task-id') || '';
+          const mtype = c.getAttribute('data-media-type') || '';
+          const r = c.getBoundingClientRect();
+          let customName = '';
+          const txt = (c.innerText || '').trim();
+          const m = txt.match(/(\d{6}_\d{4}_[a-zA-Z_]+_\w+)/);
+          if (m) customName = m[1];
+          log(`CARD.${i+1}`, 'INFO',
+            `idx=${i+1} task_id=${tid} media_type=${mtype} custom_name='${customName}' rect=(${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)})`);
+        });
+
+        log('END', 'DONE', `enumerated=${slice.length}/${cards.length}`);
+        return window.__listLog;
+      })()
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

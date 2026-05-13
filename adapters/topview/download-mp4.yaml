@@ -95,6 +95,21 @@ pipeline:
           targetCard = findCard();
           if (targetCard) {
             cardEverSeen = true;
+            // S326 fix (AutoCLI#3) · Topview card download icon is hover-revealed (opacity:0 unless hover).
+            // Dispatch hover events on card + inner media before querying for SVG · else hasDl=false.
+            const cr = targetCard.getBoundingClientRect();
+            const ccx = cr.left + cr.width / 2, ccy = cr.top + cr.height / 2;
+            ['pointerover','pointerenter'].forEach(t => targetCard.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:ccx, clientY:ccy })));
+            ['mouseover','mouseenter'].forEach(t => targetCard.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:ccx, clientY:ccy })));
+            const innerMedia = targetCard.querySelector('img, video');
+            if (innerMedia) {
+              const ir = innerMedia.getBoundingClientRect();
+              const icx = ir.left + ir.width / 2, icy = ir.top + ir.height / 2;
+              ['pointerover','pointerenter'].forEach(t => innerMedia.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:icx, clientY:icy })));
+              ['mouseover','mouseenter'].forEach(t => innerMedia.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:icx, clientY:icy })));
+            }
+            await new Promise(r => setTimeout(r, 400));
+
             const video = targetCard.querySelector('video');
             const poster = (video && video.getAttribute('poster')) || '';
             const src = (video && video.src) || '';
