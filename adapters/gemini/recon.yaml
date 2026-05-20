@@ -1,0 +1,71 @@
+# Gemini web UI recon · dump input (contenteditable) + send button + response container · sends tiny test msg
+# License: Apache-2.0
+site: gemini
+name: recon
+description: Recon gemini.google.com DOM (input / send / response selectors) via a tiny test message
+domain: gemini.google.com
+strategy: cookie
+browser: true
+timeoutSeconds: 120
+
+args: {}
+columns: [field, value]
+
+pipeline:
+  - navigate: https://gemini.google.com/app
+  - wait: 6
+  - evaluate: |
+      (async () => {
+        const out = [];
+        const push = (f, v) => out.push({ field: f, value: String(v == null ? '' : v).slice(0, 300) });
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        push('url', location.href);
+        push('title', document.title);
+        const bodyTxt = document.body.innerText || '';
+        push('login_state', /登入|Sign in|Log in/.test(bodyTxt) && bodyTxt.length < 800 ? 'MAYBE_LOGGED_OUT' : 'looks_logged_in');
+
+        // model label (Flash/Pro)
+        const modelEl = Array.from(document.querySelectorAll('button,div,span')).find(e => /Flash|Pro\b|2\.\d/.test((e.innerText||'').trim()) && (e.innerText||'').length < 30);
+        push('model_label', modelEl ? modelEl.innerText.trim().slice(0,30) : '(none)');
+
+        // INPUT candidates
+        const tas = Array.from(document.querySelectorAll('textarea'));
+        push('textarea_count', tas.length);
+        tas.slice(0,3).forEach((t,i)=>push('ta['+i+'].ph', t.placeholder||t.getAttribute('aria-label')||''));
+        const ces = Array.from(document.querySelectorAll('[contenteditable=true],[contenteditable]'));
+        push('contenteditable_count', ces.length);
+        ces.slice(0,4).forEach((c,i)=>push('ce['+i+']', 'cls='+(c.className||'').slice(0,50)+' ph='+(c.getAttribute('data-placeholder')||c.getAttribute('aria-label')||'')));
+        const rt = document.querySelector('rich-textarea');
+        push('rich_textarea', rt ? 'present innerCls='+((rt.querySelector('[contenteditable]')||{}).className||'').slice(0,40) : 'none');
+
+        // pick input element
+        const input = document.querySelector('rich-textarea [contenteditable=true]') || document.querySelector('div.ql-editor[contenteditable=true]') || document.querySelector('[contenteditable=true]') || tas[0];
+        push('input_chosen', input ? (input.tagName + ' cls=' + (input.className||'').slice(0,40)) : 'NONE');
+        if (!input) { push('STATUS','NO_INPUT'); return out; }
+
+        // type test message
+        input.focus();
+        if (input.tagName === 'TEXTAREA') { input.value=''; document.execCommand('insertText',false,'請回覆 OK'); }
+        else { input.textContent=''; document.execCommand('insertText', false, '請回覆 OK'); if(!input.textContent) input.textContent='請回覆 OK'; input.dispatchEvent(new InputEvent('input',{bubbles:true})); }
+        await sleep(1200);
+        push('input_after_type', (input.innerText||input.value||'').slice(0,30));
+
+        // send button candidates
+        const sendBtns = Array.from(document.querySelectorAll('button')).filter(b => /send|傳送|送出|Send message/i.test(b.getAttribute('aria-label')||b.innerText||'') || (b.querySelector('mat-icon') && /send/i.test(b.querySelector('mat-icon').textContent||'')));
+        push('send_btn_candidates', sendBtns.map(b => '"'+(b.getAttribute('aria-label')||b.innerText||'icon').trim().slice(0,16)+'"'+(b.disabled?'(dis)':'')).join(' / ') || '(none)');
+
+        const sendBtn = sendBtns.find(b=>!b.disabled) || sendBtns[0];
+        if (sendBtn) { sendBtn.click(); push('sent','clicked send'); }
+        else { input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',keyCode:13,bubbles:true})); push('sent','Enter key'); }
+
+        // wait for response + dump response container candidates
+        await sleep(8000);
+        const respSel = ['message-content','.model-response-text','.markdown','model-response','[data-response-index]','.response-container','.conversation-container'];
+        respSel.forEach(s => { const n=document.querySelectorAll(s).length; if(n) push('resp_sel['+s+']', n + ' · text=' + ((document.querySelectorAll(s)[document.querySelectorAll(s).length-1].innerText)||'').slice(0,60)); });
+        // generic: last large text block
+        push('STATUS','DONE');
+        return out;
+      })()
+  - map:
+      field: ${{ item.field }}
+      value: ${{ item.value }}

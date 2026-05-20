@@ -1,0 +1,93 @@
+# Gemini consult adapter · send a message to gemini.google.com and capture the response
+# Mirrors grok/ask.yaml · for hermesDr Layer 2 script 毒舌 critique consult (Gemini Pro · paid · codex-free)
+# License: Apache-2.0
+site: gemini
+name: ask
+description: Send a message to Gemini (gemini.google.com) and get the response text
+domain: gemini.google.com
+strategy: cookie
+browser: true
+timeoutSeconds: 600
+
+args:
+  prompt:
+    positional: true
+    type: string
+    required: true
+    description: Prompt to send to Gemini
+  resp_timeout:
+    type: int
+    default: 240
+    description: Max seconds to wait for the response to finish streaming
+  new:
+    type: boolean
+    default: true
+    description: Start a new chat (新對話) before sending
+
+columns: [response]
+
+pipeline:
+  - navigate: https://gemini.google.com/app
+  - wait: 5
+  - evaluate: |
+      (async () => {
+        const prompt = ${{ args.prompt | json }};
+        const timeoutMs = (${{ args.resp_timeout }} || 240) * 1000;
+        const wantNew = ${{ args.new }};
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+        if (/Just a moment|正在驗證/.test(document.title)) return [{ response: '[BLOCKED] cloudflare/title=' + document.title }];
+
+        // optional: start a new chat for a clean consult
+        if (wantNew) {
+          const nb = Array.from(document.querySelectorAll('button,a,[role=button]')).find(e => /新對話|New chat|開始新的對話/i.test((e.innerText||e.getAttribute('aria-label')||'')));
+          if (nb) { nb.click(); await sleep(2500); }
+        }
+
+        // locate input (Gemini = Quill contenteditable inside rich-textarea)
+        const input = document.querySelector('rich-textarea [contenteditable=true]')
+          || document.querySelector('div.ql-editor[contenteditable=true]')
+          || document.querySelector('[contenteditable=true]')
+          || document.querySelector('textarea');
+        if (!input) return [{ response: '[SEND FAILED] no input element found' }];
+
+        input.focus();
+        if (input.tagName === 'TEXTAREA') { input.value=''; document.execCommand('insertText', false, prompt); }
+        else {
+          input.textContent = '';
+          document.execCommand('selectAll');
+          document.execCommand('insertText', false, prompt);
+          if (!(input.innerText||'').trim()) { input.textContent = prompt; }
+          input.dispatchEvent(new InputEvent('input', { bubbles: true }));
+        }
+        await sleep(1500);
+
+        // count existing responses before send (to detect the NEW one)
+        const RESP = '.model-response-text, message-content .markdown, .markdown';
+        const respCountBefore = document.querySelectorAll(RESP).length;
+
+        // send: prefer send button, fallback Enter
+        const sendBtn = Array.from(document.querySelectorAll('button')).find(b => !b.disabled && (/send|傳送|送出|Send message/i.test(b.getAttribute('aria-label')||'') || (b.querySelector('mat-icon') && /send/i.test(b.querySelector('mat-icon').textContent||''))));
+        if (sendBtn) sendBtn.click();
+        else input.dispatchEvent(new KeyboardEvent('keydown', { key:'Enter', code:'Enter', keyCode:13, bubbles:true }));
+
+        // poll until a new response appears + text stabilises
+        const start = Date.now();
+        let lastText = '', stable = 0;
+        while (Date.now() - start < timeoutMs) {
+          await sleep(3000);
+          const nodes = document.querySelectorAll(RESP);
+          if (nodes.length === 0) continue;
+          // the new response = last node (must be at/after respCountBefore, or just take last)
+          const last = nodes[nodes.length - 1];
+          const text = (last.innerText || '').trim();
+          if (!text || text.length < 2) continue;
+          // ignore if it's still echoing our prompt only
+          if (text === lastText) { stable++; if (stable >= 2) return [{ response: text }]; }
+          else stable = 0;
+          lastText = text;
+        }
+        return [{ response: lastText || '[NO RESPONSE] timed out after ' + Math.round(timeoutMs/1000) + 's' }];
+      })()
+  - map:
+      response: ${{ item.response }}
