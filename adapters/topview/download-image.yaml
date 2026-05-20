@@ -1,0 +1,111 @@
+# Topview download-image · click lucide-download on an IMAGE task card · Chrome saves to ~/Downloads
+# Mirrors download-mp4.yaml (image download is identical to video per Sunny S356) · target by name prefix (260520_NNNN)
+# License: Apache-2.0
+site: topview
+name: download-image
+description: Click download icon on a Topview IMAGE card (matched by name prefix) · save to ~/Downloads
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 300
+
+args:
+  name_prefix:
+    type: string
+    default: "260520_0010"
+    description: card filename prefix to target (e.g. 260520_0010 = first/newest image)
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 6
+  - evaluate: |
+      (async () => {
+        window.__dlLog = []; window.__dlAbort = false; window.__targetCard = null; window.__targetDlBtn = null; window.__dlCustomName = ''; window.__dlReason = '';
+        const log = (p,s,d) => window.__dlLog.push({ phase:p, status:s, detail:d });
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) { window.__dlAbort=true; window.__dlReason='CLOUDFLARE_BLOCKED'; log('P0','FAIL','CLOUDFLARE_BLOCKED'); return {ok:false}; }
+
+        const wantPrefix = String(${{ args.name_prefix | json }}).trim();
+        log('P1.0','OK','want='+wantPrefix+' url='+location.pathname);
+
+        // find the task card whose text contains the wanted name prefix
+        const findCard = () => Array.from(document.querySelectorAll('[data-task-card]')).find(c => (c.innerText||'').includes(wantPrefix))
+          || Array.from(document.querySelectorAll('[data-task-card][data-media-type="image"]'))[0]
+          || Array.from(document.querySelectorAll('[data-task-card]')).find(c => /\d{6}_\d{4}_text_to_image/.test(c.innerText||''));
+
+        const startTs = Date.now(); let iter=0; let targetCard=null; let seen=false;
+        while ((Date.now()-startTs)/1000 < 60) {
+          iter++;
+          targetCard = findCard();
+          if (targetCard) {
+            seen = true;
+            const cr = targetCard.getBoundingClientRect();
+            const ccx=cr.left+cr.width/2, ccy=cr.top+cr.height/2;
+            targetCard.scrollIntoView({block:'center'});
+            ['pointerover','pointerenter'].forEach(t=>targetCard.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:ccx,clientY:ccy})));
+            ['mouseover','mouseenter'].forEach(t=>targetCard.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:ccx,clientY:ccy})));
+            const inner = targetCard.querySelector('img,video');
+            if (inner){ const ir=inner.getBoundingClientRect(); const icx=ir.left+ir.width/2, icy=ir.top+ir.height/2; ['pointerover','pointerenter'].forEach(t=>inner.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:icx,clientY:icy}))); ['mouseover','mouseenter'].forEach(t=>inner.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:icx,clientY:icy}))); }
+            await new Promise(r=>setTimeout(r,500));
+            const dlSvg = targetCard.querySelector('svg.lucide-download');
+            const dlBtn = dlSvg ? dlSvg.closest('button') : null;
+            const dlRect = dlBtn ? dlBtn.getBoundingClientRect() : null;
+            const dlVisible = dlRect && dlRect.width>0 && dlRect.height>0;
+            log('P1.poll.'+iter, dlVisible?'READY':'WAIT', 'tid='+(targetCard.getAttribute('data-task-id')||'?').slice(0,8)+' hasDl='+!!dlBtn+' vis='+dlVisible);
+            if (dlVisible) break;
+          } else log('P1.poll.'+iter,'NO_CARD','prefix not found');
+          await new Promise(r=>setTimeout(r,3000));
+        }
+
+        targetCard = findCard();
+        if (!targetCard) { window.__dlAbort=true; window.__dlReason = seen?'NOT_READY_TIMEOUT':'CARD_NOT_FOUND'; log('P1.X','FAIL',window.__dlReason); return {ok:false}; }
+        const dlSvg = targetCard.querySelector('svg.lucide-download');
+        const dlBtn = dlSvg ? dlSvg.closest('button') : null;
+        if (!dlBtn) { window.__dlAbort=true; window.__dlReason='DL_BUTTON_NOT_FOUND'; log('P1.X','FAIL','DL_BUTTON_NOT_FOUND'); return {ok:false}; }
+        const rect = dlBtn.getBoundingClientRect();
+        if (!(rect.width>0&&rect.height>0)) { window.__dlAbort=true; window.__dlReason='DL_BUTTON_NOT_VISIBLE'; log('P1.X','FAIL','DL_BUTTON_NOT_VISIBLE'); return {ok:false}; }
+        const cardText = (targetCard.innerText||'').trim();
+        const nm = cardText.match(/\d{6}_\d{4}_[a-zA-Z]+_\w+/);
+        window.__dlCustomName = nm ? nm[0] : wantPrefix;
+        window.__targetCard = targetCard; window.__targetDlBtn = dlBtn; window.__dlTargetTaskId = targetCard.getAttribute('data-task-id')||'';
+        log('P1.OK','READY','tid='+window.__dlTargetTaskId+' name='+window.__dlCustomName);
+        return {ok:true};
+      })()
+  - evaluate: |
+      (async () => {
+        const log=(p,s,d)=>window.__dlLog.push({phase:p,status:s,detail:d});
+        if (window.__dlAbort) { log('P2.0','SKIP','aborted '+window.__dlReason); return {ok:false}; }
+        const card=window.__targetCard, dlBtn=window.__targetDlBtn;
+        const cr=card.getBoundingClientRect(); const cx=cr.left+cr.width/2, cy=cr.top+cr.height/2;
+        ['pointerover','pointerenter'].forEach(t=>card.dispatchEvent(new PointerEvent(t,{bubbles:true,cancelable:true,clientX:cx,clientY:cy})));
+        ['mouseover','mouseenter'].forEach(t=>card.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:cx,clientY:cy})));
+        await new Promise(r=>setTimeout(r,400));
+        const r=dlBtn.getBoundingClientRect(); const bx=r.left+r.width/2, by=r.top+r.height/2;
+        const mk=(t)=>new MouseEvent(t,{bubbles:true,cancelable:true,view:window,clientX:bx,clientY:by,button:0});
+        dlBtn.dispatchEvent(new PointerEvent('pointerover',{bubbles:true,cancelable:true,clientX:bx,clientY:by}));
+        dlBtn.dispatchEvent(mk('mouseover'));
+        await new Promise(r=>setTimeout(r,200));
+        dlBtn.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,clientX:bx,clientY:by}));
+        dlBtn.dispatchEvent(mk('mousedown'));
+        dlBtn.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,clientX:bx,clientY:by}));
+        dlBtn.dispatchEvent(mk('mouseup'));
+        dlBtn.dispatchEvent(mk('click'));
+        if (typeof dlBtn.click==='function') dlBtn.click();
+        window.__dlClickedAtMs=Date.now();
+        await new Promise(r=>setTimeout(r,2000));
+        log('P2.2','OK','click dispatched at ('+Math.round(bx)+','+Math.round(by)+')');
+        return {ok:true};
+      })()
+  - wait: 3
+  - evaluate: |
+      (() => {
+        const log=(p,s,d)=>window.__dlLog.push({phase:p,status:s,detail:d});
+        const ok=!window.__dlAbort; const reason=window.__dlReason||(ok?'OK':'UNKNOWN');
+        log('SUMMARY', ok?'OK':'FAIL', 'ok='+ok+' reason='+reason+' target_task_id='+(window.__dlTargetTaskId||'')+" custom_name='"+(window.__dlCustomName||'')+"' clicked_at_ms="+(window.__dlClickedAtMs||0));
+        return window.__dlLog;
+      })()
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

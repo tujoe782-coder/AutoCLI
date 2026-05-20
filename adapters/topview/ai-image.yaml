@@ -1,0 +1,188 @@
+# Topview AI Image · text-to-image generation (GPT Image 2 default) via web UI cookie session
+# S356 build · quota-free-of-codex path (annual Ultra 積分 pool · web-UI-only · API text2image PAYG pool = 0)
+# Flow: navigate → model GPT Image 2 → aspect → prompt (native setter) → 生成 → board-chooser modal (select board + toggle auto-open) → poll credit-drop + largest-new-img
+# NOTE: prompt textarea maxlength 10000 · 生成 shows cost once prompt entered · board modal pops on first 生成
+# License: Apache-2.0
+site: topview
+name: ai-image
+description: Topview AI Image text-to-image generation · GPT Image 2 default · auto board-select · returns generated image URL
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 600
+
+args:
+  prompt:
+    type: string
+    default: ""
+    description: "image generation prompt"
+  aspect:
+    type: string
+    default: "3:4"
+    description: "aspect ratio (1:1/3:4/2:3/9:16/16:9/4:3/5:4/4:5/...)"
+  board:
+    type: string
+    default: "ep01-character-bank"
+    description: "board name to save generation into (board chooser modal)"
+  poll_max_seconds:
+    type: number
+    default: 240
+
+columns: [field, value]
+
+pipeline:
+  - navigate: https://www.topview.ai/tw/ai-image-generator?tool-type=text-to-image
+  - wait: 7
+  - evaluate: |
+      (async () => {
+        const out = [];
+        const push = (f, v) => out.push({ field: f, value: String(v == null ? '' : v).slice(0, 500) });
+        const sleep = ms => new Promise(r => setTimeout(r, ms));
+        const mkClick = (el) => {
+          if (!el) return false;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width/2, cy = r.top + r.height/2;
+          const P = t => el.dispatchEvent(new PointerEvent(t, {bubbles:true,cancelable:true,clientX:cx,clientY:cy}));
+          const M = t => el.dispatchEvent(new MouseEvent(t, {bubbles:true,cancelable:true,view:window,clientX:cx,clientY:cy,button:0}));
+          P('pointerover'); P('pointerenter'); M('mouseover'); M('mouseenter');
+          P('pointerdown'); M('mousedown'); P('pointerup'); M('mouseup'); M('click'); el.click();
+          return true;
+        };
+        const exact = (txt) => Array.from(document.querySelectorAll('button,div,span,label,[role=option],[role=menuitem],li'))
+          .filter(e => (e.innerText || e.textContent || '').trim() === txt);
+        const visible = el => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+        const creditNum = () => { const m = document.body.innerText.match(/([\d,]+\.\d+)\s*\n?\s*Ultra/); return m ? parseFloat(m[1].replace(/,/g,'')) : null; };
+        const area = el => { const r = el.getBoundingClientRect(); return r.width * r.height; };
+        const imgMap = () => {
+          const m = new Map();
+          Array.from(document.querySelectorAll('img')).forEach(im => { const s = im.src || ''; if (/^https?:/.test(s)) m.set(s.split('?')[0], { src: s, area: area(im) }); });
+          Array.from(document.querySelectorAll('div,span,a,figure')).forEach(el => { const bg = (getComputedStyle(el).backgroundImage || ''); const mm = bg.match(/url\(["']?(https?:[^"')]+)/); if (mm) { const s = mm[1]; m.set(s.split('?')[0], { src: s, area: area(el) }); } });
+          return m;
+        };
+        const boardModalOpen = () => /選擇要使用此工具的看板|選擇要使用此工具/.test(document.body.innerText);
+
+        const target_aspect = ${{ args.aspect | json }};
+        const prompt        = ${{ args.prompt | json }};
+        const board_name    = ${{ args.board | json }};
+        const pollMax       = parseInt(${{ args.poll_max_seconds | json }}) || 240;
+
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證')) { push('STATUS','CLOUDFLARE_BLOCKED'); return out; }
+        if (!prompt || !prompt.trim()) { push('STATUS','EMPTY_PROMPT'); return out; }
+
+        // If a board modal is already open from a prior run, select board to clear it
+        if (boardModalOpen()) {
+          const ep = Array.from(document.querySelectorAll('div,li,button,a')).find(e => (e.innerText||'').includes(board_name) && (e.innerText||'').length < 90);
+          if (ep) { mkClick(ep); await sleep(2500); push('precleared_modal', 'yes'); }
+        }
+
+        const creditBefore = creditNum();
+        push('credit_before', creditBefore);
+
+        // 1 · verify model = GPT Image 2
+        const modelBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText||'').includes('GPT Image'));
+        push('model_current', modelBtn ? modelBtn.innerText.trim().slice(0,30) : '(notfound)');
+        if (!modelBtn || !modelBtn.innerText.includes('GPT Image 2')) { push('STATUS','MODEL_NOT_GPT2'); return out; }
+
+        // 2 · set aspect
+        const ratioBtn = Array.from(document.querySelectorAll('button')).find(b => /^\d{1,2}:\d{1,2}$/.test((b.innerText||'').trim()));
+        push('ratio_before', ratioBtn ? ratioBtn.innerText.trim() : '(notfound)');
+        if (ratioBtn && ratioBtn.innerText.trim() !== target_aspect) {
+          mkClick(ratioBtn); await sleep(1100);
+          const opt = exact(target_aspect).filter(visible).filter(e => e !== ratioBtn).pop();
+          if (opt) { mkClick(opt); await sleep(900); push('ratio_set', 'clicked ' + target_aspect); }
+          else push('ratio_set', 'OPTION_NOT_FOUND');
+        } else push('ratio_set', 'already ' + target_aspect);
+
+        // 3 · prompt
+        const ta = document.querySelector('textarea');
+        if (!ta) { push('STATUS','TEXTAREA_NOT_FOUND'); return out; }
+        ta.focus();
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, prompt);
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        ta.dispatchEvent(new Event('change', { bubbles: true }));
+        await sleep(900);
+        push('prompt_len_set', ta.value.length);
+        if (ta.value.length < Math.min(50, prompt.length)) { push('STATUS','PROMPT_SET_FAILED'); return out; }
+
+        const before = imgMap();
+        push('img_before_count', before.size);
+
+        // 4 · click 生成 (matches /^生成/ once cost shown · avoid 快速生成)
+        await sleep(500);
+        const findGen = () => Array.from(document.querySelectorAll('button')).filter(b => /^生成/.test((b.innerText||'').trim()) && !/快速/.test(b.innerText||'') && visible(b)).sort((a,b)=>area(b)-area(a))[0];
+        let genBtn = findGen();
+        if (!genBtn) { push('STATUS','GEN_BTN_NOT_FOUND'); return out; }
+        push('gen_btn_text', genBtn.innerText.trim().slice(0,24));
+        mkClick(genBtn);
+        push('gen_clicked', 'yes');
+        await sleep(2800);
+
+        // 5 · board-chooser modal handling
+        if (boardModalOpen()) {
+          push('board_modal', 'appeared');
+          // toggle 自動開啟上次編輯的看板 ON (skip modal future runs) · best-effort
+          const tg = Array.from(document.querySelectorAll('*')).find(e => (e.textContent||'').trim() === '自動開啟上次編輯的看板');
+          if (tg) {
+            const cont = tg.parentElement?.parentElement || tg.parentElement;
+            const sw = cont ? cont.querySelector('[role=switch],input[type=checkbox],button[aria-checked]') : null;
+            if (sw && (sw.getAttribute('aria-checked') === 'false' || sw.checked === false)) { mkClick(sw); push('auto_toggle','set_on'); await sleep(500); }
+            else push('auto_toggle', sw ? 'already_on_or_unknown' : 'switch_not_found');
+          }
+          // click target board row
+          const ep = Array.from(document.querySelectorAll('div,li,button,a')).filter(e => (e.innerText||'').includes(board_name) && (e.innerText||'').length < 90).sort((a,b)=>area(a)-area(b))[0];
+          if (ep) { mkClick(ep); push('board_selected', board_name); await sleep(3000); }
+          else { push('STATUS','BOARD_ROW_NOT_FOUND'); push('board_rows', Array.from(document.querySelectorAll('div,li')).filter(e=>/資產\s*[·•]/.test(e.innerText||'')&&(e.innerText||'').length<80).map(e=>(e.innerText||'').replace(/\n/g,' ').slice(0,30)).slice(0,6).join(' | ')); return out; }
+
+          // after board select · generation may need 生成 again
+          await sleep(1500);
+          const cAfterBoard = creditNum();
+          if (!(creditBefore != null && cAfterBoard != null && cAfterBoard < creditBefore - 0.001)) {
+            const g2 = findGen();
+            if (g2) { mkClick(g2); push('gen_clicked_2', 'yes (post-board)'); }
+          }
+        } else push('board_modal', 'none (board persisted?)');
+
+        // 6 · poll credit drop → capture largest new img
+        let resultUrls = [], reason = '';
+        const deadline = Date.now() + pollMax * 1000;
+        let polls = 0;
+        await sleep(14000);
+        while (Date.now() < deadline) {
+          polls++;
+          const cNow = creditNum();
+          if (/生成失敗|Generation failed|內容違規|content policy|violat|risk control|審核未/i.test(document.body.innerText)) { reason = 'GEN_FAILED_TEXT'; break; }
+          if (creditBefore != null && cNow != null && cNow < creditBefore - 0.001) {
+            // credit charged · result image renders a few sec later · extended sub-poll up to ~45s
+            let big = [];
+            for (let k = 0; k < 15; k++) {
+              await sleep(3000);
+              const now = imgMap();
+              const fresh = [...now.entries()].filter(([k2]) => !before.has(k2)).map(([k2,v]) => v);
+              big = fresh.filter(v => v.area > 8000).sort((a,b)=> b.area - a.area);
+              if (big.length) break;
+            }
+            if (big.length) { resultUrls = big.slice(0,4).map(v=>v.src); reason = 'credit_drop·new_img'; }
+            else { reason = 'credit_drop·no_new_img'; }
+            break;
+          }
+          await sleep(7000);
+        }
+        push('polls', polls);
+        push('credit_after', creditNum());
+
+        if (resultUrls.length) {
+          push('STATUS','RESULT_FOUND');
+          push('result_reason', reason);
+          resultUrls.forEach((u,i) => push('result_url['+i+']', u));
+          push('result_url_fullres', resultUrls[0].split('?')[0]);
+        } else {
+          push('STATUS', reason || 'NO_RESULT_TIMEOUT');
+          const fresh = [...imgMap().entries()].filter(([k]) => !before.has(k)).map(([k,v]) => v).sort((a,b)=>b.area-a.area);
+          fresh.slice(0,5).forEach((v,i)=> push('fresh_img['+i+']', 'area='+Math.round(v.area)+' '+v.src.slice(0,100)));
+        }
+        return out;
+      })()
+  - map:
+      field: ${{ item.field }}
+      value: ${{ item.value }}

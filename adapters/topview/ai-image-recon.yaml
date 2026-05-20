@@ -1,0 +1,108 @@
+# Topview AI Image (text-to-image) reconnaissance adapter
+# Navigate to the in-app AI Image generator + dump DOM inventory so we can build
+# a real ai-image generation adapter (model selector / prompt input / aspect /
+# resolution / generate button / 積分 balance / result+download).
+# License: Apache-2.0 (same as parent autocli repo)
+site: topview
+name: ai-image-recon
+description: Recon Topview AI Image (text-to-image) web tool DOM · dump buttons/textareas/selects/model names/積分 balance
+domain: www.topview.ai
+strategy: cookie
+browser: true
+
+args:
+  url:
+    type: string
+    default: "https://www.topview.ai/ai-image-generator?tool-type=text-to-image"
+    description: AI Image tool URL to recon
+
+columns: [field, value]
+
+pipeline:
+  - navigate: https://www.topview.ai/ai-image-generator?tool-type=text-to-image
+  - wait: 6
+  - evaluate: |
+      (async () => {
+        const out = [];
+        const push = (f, v) => out.push({ field: f, value: String(v == null ? '' : v).slice(0, 220) });
+
+        if (document.title.includes('Just a moment') || document.title.includes('正在驗證') || document.title.includes('Verifying')) {
+          push('STATUS', 'CLOUDFLARE_BLOCKED');
+          return out;
+        }
+
+        push('STATUS', 'LOADED');
+        push('title', document.title);
+        push('url', window.location.href);
+        push('body_chars', document.body.innerText.length);
+
+        // login state heuristic
+        const bodyTxt = document.body.innerText || '';
+        push('has_login_word', /登入|登錄|Log in|Sign in|登录/.test(bodyTxt) ? 'YES(maybe-logged-out)' : 'no');
+
+        // 積分 / credit balance text
+        const creditMatch = bodyTxt.match(/[\d,]+\.?\d*\s*(Ultra|積分|積點|credits?|Credits?)/g);
+        push('credit_text', creditMatch ? creditMatch.slice(0, 5).join(' | ') : '(none found)');
+
+        // model name mentions anywhere in page
+        const models = ['GPT Image', 'Nano Banana', 'Seedream', 'Grok Image', 'Imagen', 'Kontext', 'Flux'];
+        const modelsFound = models.filter(m => bodyTxt.includes(m));
+        push('model_names_in_page', modelsFound.join(' | ') || '(none)');
+
+        // ALL buttons text
+        const buttons = Array.from(document.querySelectorAll('button'));
+        push('button_count', buttons.length);
+        const btnTexts = buttons.map((b, i) => {
+          const t = (b.innerText || '').trim().slice(0, 24);
+          return t ? `[${i}]"${t}"` : null;
+        }).filter(Boolean);
+        push('buttons', btnTexts.slice(0, 60).join(' / '));
+
+        // generate-like buttons
+        const genBtns = buttons.filter(b => /生成|Generate|Create|產生|建立/.test(b.innerText || ''));
+        push('generate_btns', genBtns.map(b => `"${(b.innerText||'').trim().slice(0,20)}"`).join(' / ') || '(none)');
+
+        // textareas
+        const tas = Array.from(document.querySelectorAll('textarea'));
+        push('textarea_count', tas.length);
+        tas.slice(0, 5).forEach((ta, i) => push(`ta[${i}].placeholder`, ta.placeholder || ''));
+
+        // contenteditable prompt areas
+        const ces = Array.from(document.querySelectorAll('[contenteditable=true],[contenteditable]'));
+        push('contenteditable_count', ces.length);
+        ces.slice(0, 4).forEach((el, i) => {
+          push(`ce[${i}].class`, (el.className || '').slice(0, 80));
+          push(`ce[${i}].dataph`, el.getAttribute('data-placeholder') || el.getAttribute('placeholder') || '');
+        });
+
+        // select / combobox / radio (model + aspect + resolution selectors)
+        const selects = Array.from(document.querySelectorAll('select'));
+        push('select_count', selects.length);
+        selects.slice(0, 6).forEach((s, i) => {
+          const opts = Array.from(s.options || []).map(o => o.textContent.trim().slice(0, 16)).slice(0, 12);
+          push(`select[${i}].options`, opts.join(','));
+        });
+
+        // role=combobox / role=radiogroup / dropdown triggers (Radix-style)
+        const combos = Array.from(document.querySelectorAll('[role=combobox],[role=listbox],[role=radiogroup],[aria-haspopup=listbox],[aria-haspopup=menu]'));
+        push('combo_count', combos.length);
+        combos.slice(0, 8).forEach((c, i) => push(`combo[${i}].text`, (c.innerText || c.getAttribute('aria-label') || '').trim().slice(0, 40)));
+
+        // aspect-ratio-like buttons (1:1, 3:4, 16:9 etc)
+        const ratioBtns = Array.from(document.querySelectorAll('button,div,span,label')).filter(el => /^\s*\d{1,2}\s*:\s*\d{1,2}\s*$/.test(el.textContent || ''));
+        push('ratio_controls', Array.from(new Set(ratioBtns.map(el => el.textContent.trim()))).slice(0, 12).join(' / ') || '(none)');
+
+        // resolution-like (1K/2K/4K/480P etc)
+        const resBtns = Array.from(document.querySelectorAll('button,div,span,label')).filter(el => /^\s*(1K|2K|4K|480P|720P|1080P|Standard|HD)\s*$/i.test(el.textContent || ''));
+        push('resolution_controls', Array.from(new Set(resBtns.map(el => el.textContent.trim()))).slice(0, 12).join(' / ') || '(none)');
+
+        // left sidebar nav items (tool switcher)
+        const navItems = Array.from(document.querySelectorAll('a,button,[role=tab],[role=menuitem]')).map(el => (el.innerText || '').trim()).filter(t => t && t.length < 16);
+        const navUniq = Array.from(new Set(navItems)).slice(0, 40);
+        push('nav_items', navUniq.join(' / '));
+
+        return out;
+      })()
+  - map:
+      field: ${{ item.field }}
+      value: ${{ item.value }}
