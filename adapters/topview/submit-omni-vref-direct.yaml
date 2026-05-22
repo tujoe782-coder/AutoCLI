@@ -1,0 +1,616 @@
+# S363 · video-reference DIRECT UPLOAD (fork of submit-omni-3chip-direct.yaml)
+# WHY: feed a real camera-movement reference clip into Seedance Omni as @Video1 (motion-transfer · Grok 第1招).
+#      submit-omni-*-direct chip-binding was hard-wired to @ImageN. This adapter = @Image1 (storyboard / first frame)
+#      + @Video1 (motion-transfer clip). NO board-select.
+# RECON-PROVEN (S363 video-ref-recon + recon2 · 0 cr):
+#   - upload [image, video] → chips '@Image1' (teal, img blob:) + '@Video1' (violet, img data:image base64 poster)
+#   - mention picker lists VIDEO first: '@'+Enter → @Video1 ; '@'+ArrowDown+Enter → @Image1
+#   - bound mention attr = data-image-tag="@Video1" (same attr name as image · violet styling)
+# Diff from 3chip-direct: 2 files (image+video) · P0 expects [@Image1,@Video1] · P2.verify by CYAN LABEL TEXT
+#   (NOT blob check · video poster is data:image) · P3 binds @Image1 via @+Down+Enter, @Video1 via @+Enter ·
+#   P4 gate slotBound===2 · NEW dry_run arg (skip final 生成 click · 0 cr full-pipeline proof).
+# License: Apache-2.0
+
+site: topview
+name: submit-omni-vref-direct
+description: Topview Seedance video-reference submit · @Image1 (storyboard) + @Video1 (motion-transfer clip) · DIRECT upload · priority · dry_run gate
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 600
+
+args:
+  file_image:
+    type: string
+    required: true
+    description: Absolute path · storyboard / first-frame still → @Image1
+  file_video:
+    type: string
+    required: true
+    description: Absolute path · motion-transfer reference clip (.mp4/.mov ≤15s) → @Video1
+  resolution:
+    type: string
+    default: "480p"
+    description: 480p | 720p | 1080p (default 480p)
+  duration:
+    type: int
+    default: 4
+    description: 4 | 5 | 6 | 8 | 10 | 15 seconds (default 4)
+  prompt:
+    type: string
+    required: true
+    description: Prose with @Image1 + @Video1 markers in order · "[p0] @Image1 [p1] @Video1 [p2]" · max 15000 chars
+  output_name:
+    type: string
+    required: true
+    description: Output identifier (logged)
+  dry_run:
+    type: bool
+    default: false
+    description: If true, run full pipeline (upload + bind + all gates) but SKIP the final 生成 click · 0 cr · for pre-flight proof
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P0 · INIT window state from args · parse prompt around @Image1 / @Video1
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (() => {
+        window.__omniLog = [];
+        window.__omniAbort = false;
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const target_resolution = ${{ args.resolution | json }};
+        const target_duration = ${{ args.duration | json }};
+        const prompt = ${{ args.prompt | json }};
+        const output_name = ${{ args.output_name | json }};
+        const dry_run = ${{ args.dry_run | json }};
+        const COST_PER_SEC = { '480p': 0.5, '720p': 1.0, '1080p': 2.5 };
+        window.__omniTargetRes = String(target_resolution).toLowerCase();
+        window.__omniTargetDur = parseInt(target_duration);
+        window.__omniExpectedCost = COST_PER_SEC[window.__omniTargetRes] * window.__omniTargetDur;
+        window.__omniOutputName = output_name;
+        window.__omniDryRun = (dry_run === true || dry_run === 'true');
+
+        // Parse prompt into prose0/1/2 around @Image1 / @Video1 markers
+        const tokens = prompt.split(/(@(?:Image|Video)\d+)/);
+        const segments = [];
+        const chipsFound = [];
+        for (const t of tokens) {
+          const m = t.match(/^@((?:Image|Video)\d+)$/);
+          if (m) { chipsFound.push('@' + m[1]); segments.push({ type: 'chip', tag: '@' + m[1] }); }
+          else if (t) segments.push({ type: 'prose', text: t });
+        }
+        if (chipsFound.length !== 2 || chipsFound[0] !== '@Image1' || chipsFound[1] !== '@Video1') {
+          log('P0', 'FAIL', `CHIPS_MISMATCH expected [@Image1,@Video1] got [${chipsFound.join(',')}]`);
+          window.__omniAbort = true;
+          return { ok: false };
+        }
+        let prose0 = '', prose1 = '', prose2 = '', phase = 0;
+        for (const seg of segments) {
+          if (seg.type === 'chip') { phase++; continue; }
+          if (phase === 0) prose0 += seg.text;
+          else if (phase === 1) prose1 += seg.text;
+          else prose2 += seg.text;
+        }
+        window.__omniProse0 = prose0;
+        window.__omniProse1 = prose1;
+        window.__omniProse2 = prose2;
+        log('P0', 'OK', `res=${window.__omniTargetRes} dur=${window.__omniTargetDur}s expectedCost=${window.__omniExpectedCost}cr · dry_run=${window.__omniDryRun} · p0=${prose0.length} p1=${prose1.length} p2=${prose2.length} output=${output_name}`);
+        return { ok: true };
+      })()
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P1 · panel switch (影片 → 全參考 SEEDANCE2)
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const mkClick = async (el) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          ['pointerover','pointerenter'].forEach(t => el.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          ['mouseover','mouseenter'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          if (typeof el.click === 'function') el.click();
+        };
+        window.__omniClick = mkClick;
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1', 'FAIL', 'VIDEO_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok:false }; }
+        await mkClick(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1.1', 'OK', '影片 panel opened');
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1.2', 'FAIL', 'SEEDANCE_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok:false }; }
+        await mkClick(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1.2', 'OK', 'SEEDANCE2 panel opened');
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P1.5 · CHEVRON CLICK → 點數模式 → verify priority active (verbatim from 3chip-direct)
+  # ===========================================================================
+  - evaluate: |
+      ({ x: 478, y: 721 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseMoved, x: "${{ data.x }}", y: "${{ data.y }}", button: none, buttons: 0, clickCount: 0 }
+  - evaluate: |
+      ({ x: 478, y: 721 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mousePressed, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 1, clickCount: 1 }
+  - evaluate: |
+      ({ x: 478, y: 721 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseReleased, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 0, clickCount: 1 }
+  - wait: 2
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => { const t=(b.innerText||'').trim(); return /^生成/.test(t) && !t.includes('快速'); });
+        if (generateBtn) {
+          const genText = (generateBtn.innerText || '').trim().replace(/\n/g, ' ');
+          const isPriority = /^生成\s*(\d+(?:\.\d+)?)/.test(genText) && !/^生成\s*0(?:\s|$)/.test(genText);
+          log('P1.5.1', isPriority ? 'OK' : 'INFO', `pre-click gen='${genText}' isPriority=${isPriority}`);
+          window.__omniPrioritySkipClick = !!isPriority;
+        }
+        return { ok: true };
+      })()
+
+  - evaluate: |
+      (async () => { if (window.__omniPrioritySkipClick) return { x: 0, y: 0 }; return { x: 346, y: 549 }; })()
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseMoved, x: "${{ data.x }}", y: "${{ data.y }}", button: none, buttons: 0, clickCount: 0 }
+  - evaluate: |
+      (async () => { if (window.__omniPrioritySkipClick) return { x: 0, y: 0 }; return { x: 346, y: 549 }; })()
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mousePressed, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 1, clickCount: 1 }
+  - evaluate: |
+      (async () => { if (window.__omniPrioritySkipClick) return { x: 0, y: 0 }; return { x: 346, y: 549 }; })()
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseReleased, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 0, clickCount: 1 }
+  - wait: 2
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => { const t=(b.innerText||'').trim(); return /^生成/.test(t) && !t.includes('快速'); });
+        if (!generateBtn) { log('P1.5.3', 'FAIL', 'GENERATE_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok: false }; }
+        const genText = (generateBtn.innerText || '').trim().replace(/\n/g, ' ');
+        const costMatch = genText.match(/^生成\s*(\d+(?:\.\d+)?)/);
+        const cost = costMatch ? parseFloat(costMatch[1]) : null;
+        if (!cost || cost <= 0) { log('P1.5.3', 'FAIL', `gen='${genText}' priority switch FAILED`); window.__omniAbort = true; return { ok: false }; }
+        const gr = generateBtn.getBoundingClientRect();
+        window.__omniGenBtnX = Math.round(gr.left + gr.width / 2);
+        window.__omniGenBtnY = Math.round(gr.top + gr.height / 2);
+        window.__omniCost = cost;
+        window.__omniPriorityActive = true;
+        log('P1.5.3', 'OK', `priority active · gen='${genText}' cost=${cost}cr`);
+        return { ok: true };
+      })()
+
+  # ===========================================================================
+  # P1.6 · RESOLUTION set (verbatim from 3chip-direct)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.6.A', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const resBtn = buttons.find(b => { const t=(b.innerText||'').trim(); const r=b.getBoundingClientRect(); return /^(480p|720p|1080p)$/i.test(t) && r.width>100 && r.width<300 && r.height>20 && r.height<50; });
+        if (!resBtn) { log('P1.6.A', 'FAIL', 'RESOLUTION_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok: false }; }
+        const currentRes = (resBtn.innerText || '').trim().toLowerCase();
+        const targetRes = window.__omniTargetRes;
+        const r = resBtn.getBoundingClientRect();
+        window.__omniResBtnX = Math.round(r.left + r.width / 2);
+        window.__omniResBtnY = Math.round(r.top + r.height / 2);
+        if (currentRes === targetRes) { window.__omniResSkipClick = true; log('P1.6.A', 'OK', `already=${currentRes} · skip`); return { ok: true }; }
+        window.__omniResSkipClick = false;
+        await window.__omniClick(resBtn);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.6.A', 'OK', `current=${currentRes} target=${targetRes} · clicked`);
+        return { ok: true };
+      })()
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort || window.__omniResSkipClick) { log('P1.6.B', 'SKIP', window.__omniResSkipClick ? 'already correct' : 'aborted'); return { ok: false }; }
+        const targetRes = window.__omniTargetRes;
+        const targetResUpper = targetRes.toUpperCase();
+        const targetResNum = targetRes.replace(/p$/i, '');
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const candidates = allEls.filter(el => {
+          if (el.children.length > 0) return false;
+          const t = (el.innerText || '').trim();
+          if (!t) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 5 || r.height < 5 || r.width > 400 || r.height > 80) return false;
+          return t === targetRes || t === targetResUpper || t === targetResNum || t.toLowerCase().startsWith(targetRes + ' ') || t.toLowerCase().startsWith(targetRes + '(');
+        });
+        const opts = candidates.filter(el => { const r = el.getBoundingClientRect(); const cx = Math.round(r.left + r.width / 2); const cy = Math.round(r.top + r.height / 2); return Math.abs(cx - window.__omniResBtnX) > 5 || Math.abs(cy - window.__omniResBtnY) > 5; });
+        if (opts.length === 0) { log('P1.6.B', 'FAIL', `RES_OPT_NOT_FOUND target=${targetRes}`); window.__omniAbort = true; return { ok: false }; }
+        await window.__omniClick(opts[0]);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.6.B', 'OK', `clicked '${(opts[0].innerText||'').trim()}'`);
+        return { ok: true };
+      })()
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.6.C', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const resBtn = buttons.find(b => { const t=(b.innerText||'').trim(); const r=b.getBoundingClientRect(); return /^(480p|720p|1080p)$/i.test(t) && r.width>100 && r.width<300 && r.height>20 && r.height<50; });
+        const currentRes = resBtn ? (resBtn.innerText || '').trim().toLowerCase() : 'MISSING';
+        const ok = currentRes === window.__omniTargetRes;
+        log('P1.6.C', ok ? 'OK' : 'FAIL', `resolution='${currentRes}' target='${window.__omniTargetRes}' match=${ok}`);
+        if (!ok) window.__omniAbort = true;
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P1.7 · DURATION set (verbatim from 3chip-direct)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.7.A', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const durBtn = buttons.find(b => { const t=(b.innerText||'').trim(); const r=b.getBoundingClientRect(); return /^\d+s$/.test(t) && r.width>100 && r.width<300 && r.height>20 && r.height<50; });
+        if (!durBtn) { log('P1.7.A', 'FAIL', 'DURATION_BTN_NOT_FOUND'); window.__omniAbort = true; return { ok: false }; }
+        const currentDur = parseInt((durBtn.innerText || '').trim().replace('s', ''));
+        const r = durBtn.getBoundingClientRect();
+        window.__omniDurBtnX = Math.round(r.left + r.width / 2);
+        window.__omniDurBtnY = Math.round(r.top + r.height / 2);
+        if (currentDur === window.__omniTargetDur) { window.__omniDurSkipClick = true; log('P1.7.A', 'OK', `already=${currentDur}s · skip`); return { ok: true }; }
+        window.__omniDurSkipClick = false;
+        await window.__omniClick(durBtn);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.7.A', 'OK', `current=${currentDur}s target=${window.__omniTargetDur}s · clicked`);
+        return { ok: true };
+      })()
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort || window.__omniDurSkipClick) { log('P1.7.B', 'SKIP', window.__omniDurSkipClick ? 'already correct' : 'aborted'); return { ok: false }; }
+        const targetDurStr = `${window.__omniTargetDur}s`;
+        const allEls = Array.from(document.querySelectorAll('*'));
+        const candidates = allEls.filter(el => { const t=(el.innerText||'').trim(); if (t !== targetDurStr) return false; if (el.children.length > 0) return false; const r=el.getBoundingClientRect(); return r.width>5 && r.height>5 && r.width<250 && r.height<50; });
+        const opts = candidates.filter(el => { const r = el.getBoundingClientRect(); const cx = Math.round(r.left + r.width / 2); const cy = Math.round(r.top + r.height / 2); return Math.abs(cx - window.__omniDurBtnX) > 5 || Math.abs(cy - window.__omniDurBtnY) > 5; });
+        if (opts.length === 0) { log('P1.7.B', 'FAIL', `DUR_OPT_NOT_FOUND target=${targetDurStr}`); window.__omniAbort = true; return { ok: false }; }
+        await window.__omniClick(opts[0]);
+        await new Promise(r => setTimeout(r, 1500));
+        log('P1.7.B', 'OK', `clicked '${(opts[0].innerText||'').trim()}'`);
+        return { ok: true };
+      })()
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.7.C', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const durBtn = buttons.find(b => { const t=(b.innerText||'').trim(); const r=b.getBoundingClientRect(); return /^\d+s$/.test(t) && r.width>100 && r.width<300 && r.height>20 && r.height<50; });
+        const currentDur = durBtn ? parseInt((durBtn.innerText || '').trim().replace('s', '')) : null;
+        const ok = currentDur === window.__omniTargetDur;
+        log('P1.7.C', ok ? 'OK' : 'FAIL', `duration='${currentDur}s' target='${window.__omniTargetDur}s' match=${ok}`);
+        if (!ok) window.__omniAbort = true;
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P1.8 · COST verify (verbatim from 3chip-direct)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P1.8', 'SKIP', 'aborted'); return { ok: false }; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => { const t=(b.innerText||'').trim(); return /^生成/.test(t) && !t.includes('快速'); });
+        if (!generateBtn) { log('P1.8', 'FAIL', 'GENERATE_BTN_MISSING'); window.__omniAbort = true; return { ok: false }; }
+        const genText = (generateBtn.innerText || '').trim().replace(/\n/g, ' ');
+        const costMatch = genText.match(/^生成\s*(\d+(?:\.\d+)?)/);
+        const currentCost = costMatch ? parseFloat(costMatch[1]) : null;
+        const ok = currentCost !== null && currentCost === window.__omniExpectedCost;
+        window.__omniCost = currentCost;
+        const gr = generateBtn.getBoundingClientRect();
+        window.__omniGenBtnX = Math.round(gr.left + gr.width / 2);
+        window.__omniGenBtnY = Math.round(gr.top + gr.height / 2);
+        log('P1.8', ok ? 'OK' : 'FAIL', `gen='${genText}' current=${currentCost} expected=${window.__omniExpectedCost} · ${window.__omniTargetRes} ${window.__omniTargetDur}s`);
+        if (!ok) window.__omniAbort = true;
+        return { ok };
+      })()
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P2 · upload-file-trusted — 1 call, 2 files [image → @Image1, video → @Video1]
+  # ───────────────────────────────────────────────────────────────────────────
+  - wait: 5
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        if (!fi) { log('P2.click-override.pre', 'WARN', 'no input[type=file]'); return { ok: false }; }
+        window.__omniInputClickOrig = fi.click.bind(fi);
+        fi.click = function() {
+          window.__omniLog.push({ phase: 'P2.input.click-blocked', status: 'INFO', detail: 'blocked native picker · scheduling cancel' });
+          queueMicrotask(() => { try { fi.dispatchEvent(new Event('cancel', { bubbles: true, cancelable: true })); } catch (e) {} });
+        };
+        log('P2.click-override.pre', 'OK', 'fi.click() overridden');
+        return { ok: true };
+      })()
+
+  - upload-file-trusted:
+      selector: 'button.border-dashed:has(svg.lucide-upload)'
+      input_selector: 'input[type=file]'
+      files:
+        - "${{ args.file_image }}"
+        - "${{ args.file_video }}"
+
+  # video transcode/poster may take longer than image
+  - wait: 12
+
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        if (fi && window.__omniInputClickOrig) { fi.click = window.__omniInputClickOrig; log('P2.click-override.post', 'OK', 'fi.click() restored'); }
+        else { log('P2.click-override.post', 'WARN', `restore skipped fi=${!!fi}`); }
+        return { ok: true };
+      })()
+
+  # P2.verify · expect 2 chips · labels [@Image1, @Video1] BY CYAN TEXT (video poster is data:image · NOT blob)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const labels = Array.from(document.querySelectorAll('span.text-cyan-400')).map(s => (s.textContent || '').trim());
+        const ok = labels.length === 2 && labels[0] === '@Image1' && labels[1] === '@Video1';
+        window.__omniSlotBound = labels.length;
+        window.__omniChipOk = ok;
+        log('P2.verify', ok ? 'OK' : 'FAIL', `labels=${JSON.stringify(labels)} · expected=[@Image1,@Video1]`);
+        if (!ok) window.__omniAbort = true;
+        return { ok };
+      })()
+
+  # ===========================================================================
+  # P3 · prose0 → @Image1 → prose1 → @Video1 → prose2
+  #   RECON-PROVEN: @Image1 = @+ArrowDown+Enter ; @Video1 = @+Enter (video is picker default)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.0', 'SKIP', 'aborted'); return { ok: false }; }
+        const editables = Array.from(document.querySelectorAll('[contenteditable=true], [contenteditable]'));
+        if (editables.length === 0) { log('P3.0', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniAbort = true; return { ok: false }; }
+        const target = editables[0];
+        const r = target.getBoundingClientRect();
+        const cx = r.left + 30, cy = r.top + 30;
+        const mk = (t) => new MouseEvent(t, { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy, button: 0 });
+        target.dispatchEvent(mk('mousedown')); target.dispatchEvent(mk('mouseup')); target.dispatchEvent(mk('click'));
+        target.focus();
+        await new Promise(r => setTimeout(r, 400));
+        const sel = window.getSelection(); sel.removeAllRanges();
+        const range = document.createRange(); range.selectNodeContents(target); sel.addRange(range);
+        if (target.innerText && target.innerText.length > 0) { document.execCommand('delete', false); await new Promise(r => setTimeout(r, 200)); }
+        log('P3.0', 'OK', `focused=${target === document.activeElement} cleared=${target.innerText.length === 0}`);
+        return { ok: true };
+      })()
+
+  # P3.1 prose0
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.1', 'SKIP', 'aborted'); return { ok: false }; }
+        const text = window.__omniProse0 || '';
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.1', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniAbort = true; return { ok: false }; }
+        editable.focus();
+        const range = document.createRange(); range.selectNodeContents(editable); range.collapse(false);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        const okExec = document.execCommand('insertText', false, text);
+        await new Promise(r => setTimeout(r, 800));
+        log('P3.1', okExec ? 'OK' : 'WARN', `prose0_len=${text.length}`);
+        return { ok: okExec };
+      })()
+  - wait: 1
+
+  # P3.2 @Image1 · @ trigger → ArrowDown → Enter
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyDown, key: "@", code: Digit2, modifiers: 8, text: "@", windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 }
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyUp, key: "@", code: Digit2, modifiers: 8, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 }
+  - wait: 1
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: rawKeyDown, key: ArrowDown, code: ArrowDown, windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 }
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyUp, key: ArrowDown, code: ArrowDown, windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 }
+  - wait: 1
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: rawKeyDown, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyUp, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+  - wait: 1
+
+  # P3.3 prose1
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.3', 'SKIP', 'aborted'); return { ok: false }; }
+        const text = window.__omniProse1 || '';
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.3', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniAbort = true; return { ok: false }; }
+        editable.focus();
+        const range = document.createRange(); range.selectNodeContents(editable); range.collapse(false);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        const okExec = document.execCommand('insertText', false, text);
+        await new Promise(r => setTimeout(r, 800));
+        log('P3.3', okExec ? 'OK' : 'WARN', `prose1_len=${text.length}`);
+        return { ok: okExec };
+      })()
+  - wait: 1
+
+  # P3.4 @Video1 · @ trigger → Enter (video is picker default · NO arrow)
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyDown, key: "@", code: Digit2, modifiers: 8, text: "@", windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 }
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyUp, key: "@", code: Digit2, modifiers: 8, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 }
+  - wait: 1
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: rawKeyDown, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyUp, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }
+  - wait: 1
+
+  # P3.5 prose2
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniAbort) { log('P3.5', 'SKIP', 'aborted'); return { ok: false }; }
+        const text = window.__omniProse2 || '';
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.5', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniAbort = true; return { ok: false }; }
+        editable.focus();
+        const range = document.createRange(); range.selectNodeContents(editable); range.collapse(false);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        const okExec = document.execCommand('insertText', false, text);
+        await new Promise(r => setTimeout(r, 800));
+        log('P3.5', okExec ? 'OK' : 'WARN', `prose2_len=${text.length}`);
+        return { ok: okExec };
+      })()
+  - wait: 1
+
+  # P3.9 verify chip binding (expect [@Image1, @Video1] in order)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.9', 'FAIL', 'NO_CONTENTEDITABLE'); window.__omniChipOk = false; return { ok: false }; }
+        const mentions = Array.from(editable.querySelectorAll('[data-image-tag]'));
+        const tags = mentions.map(m => m.getAttribute('data-image-tag'));
+        const expectedTags = ['@Image1', '@Video1'];
+        const chipOk = tags.length === expectedTags.length && expectedTags.every((t, i) => tags[i] === t);
+        window.__omniChipOk = chipOk;
+        log('P3.9', chipOk ? 'OK' : 'FAIL', `mentions=${mentions.length}/2 tags=${JSON.stringify(tags)} expected=${JSON.stringify(expectedTags)}`);
+        return { ok: chipOk, mention_tags: tags };
+      })()
+
+  # ===========================================================================
+  # P4 · pre-submit safety + click 生成 (dry_run gate = skip click · 0 cr)
+  # ===========================================================================
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        let balanceText = 'UNKNOWN';
+        const creditsBtn = document.querySelector('button[aria-label="Credits"]');
+        if (creditsBtn) { const raw = (creditsBtn.innerText || '').trim(); if (/^\d{1,5}(?:\.\d+)?$/.test(raw)) balanceText = raw + ' Ultra'; }
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const generateBtn = buttons.find(b => { const t=(b.innerText||'').trim(); return /^生成/.test(t) && !t.includes('快速'); });
+        const generateText = generateBtn ? (generateBtn.innerText || '').trim().replace(/\n/g, ' ') : 'MISSING';
+        const costMatch = generateText.match(/^生成\s*(\d+(?:\.\d+)?)/);
+        const currentCost = costMatch ? parseFloat(costMatch[1]) : null;
+        window.__omniGenBtnFound = !!generateBtn;
+        window.__omniIsPriority = currentCost && currentCost > 0;
+        if (generateBtn) { const gr = generateBtn.getBoundingClientRect(); window.__omniGenBtnX = Math.round(gr.left + gr.width / 2); window.__omniGenBtnY = Math.round(gr.top + gr.height / 2); }
+        log('P4.1', generateBtn && currentCost > 0 ? 'OK' : 'WARN', `balance='${balanceText}' gen='${generateText}' cost=${currentCost} expected=${window.__omniCost}`);
+        return { ok: true };
+      })()
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniDryRun) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'DRY_RUN', 'dry_run=true · SKIP 生成 click · 0 cr · pipeline proven up to submit'); return { x: 0, y: 0, skip: true }; }
+        if (window.__omniAbort) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'aborted upstream'); return { x: 0, y: 0, skip: true }; }
+        if (!window.__omniGenBtnFound) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'gen btn missing'); return { x: 0, y: 0, skip: true }; }
+        if (!window.__omniIsPriority) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'NOT priority'); return { x: 0, y: 0, skip: true }; }
+        if (window.__omniChipOk === false) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'chip-binding FAILED'); return { x: 0, y: 0, skip: true }; }
+        if (window.__omniSlotBound !== 2) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', `only ${window.__omniSlotBound}/2 slots bound`); return { x: 0, y: 0, skip: true }; }
+        if (!window.__omniPriorityActive) { window.__omniAbortClickGuard = true; log('P4.2.pre', 'ABORT', 'priority not confirmed'); return { x: 0, y: 0, skip: true }; }
+        window.__omniAbortClickGuard = false;
+        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const buttons2 = Array.from(document.querySelectorAll('button'));
+        const genBtnFresh = buttons2.find(b => { const t=(b.innerText||'').trim(); return /^生成/.test(t) && !t.includes('快速'); });
+        let freshX = window.__omniGenBtnX, freshY = window.__omniGenBtnY;
+        if (genBtnFresh) { const gr = genBtnFresh.getBoundingClientRect(); freshX = Math.round(gr.left + gr.width / 2); freshY = Math.round(gr.top + gr.height / 2); }
+        window.__omniGenBtnX = freshX; window.__omniGenBtnY = freshY;
+        log('P4.2.pre', 'OK', `pre-submit PASS · gen=(${freshX},${freshY}) cost=${window.__omniCost}`);
+        return { x: freshX, y: freshY };
+      })()
+
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseMoved, x: "${{ data.x }}", y: "${{ data.y }}", button: none, buttons: 0, clickCount: 0 }
+  - evaluate: |
+      ({ x: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnX || 270), y: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnY || 721) })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mousePressed, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 1, clickCount: 1 }
+  - evaluate: |
+      ({ x: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnX || 270), y: window.__omniAbortClickGuard ? 0 : (window.__omniGenBtnY || 721) })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseReleased, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 0, clickCount: 1 }
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        if (window.__omniDryRun) { log('P4.2.5.toast-wait', 'DRY_RUN', 'skipped toast wait (no submit)'); window.__omniSubmitToastSeen = false; return { ok: true }; }
+        const start = Date.now();
+        let seen = false, seenAt = 0, seenText = '';
+        for (let i = 0; i < 40; i++) {
+          const all = (document.body && document.body.innerText) || '';
+          if (/任務提交成功|已成功建立\s*\d+\s*個任務|提交成功|Generation\s+started|Successfully\s+(submitted|created)/i.test(all)) {
+            seen = true; seenAt = Date.now() - start;
+            const els = Array.from(document.querySelectorAll('*')).filter(e => { const t = (e.textContent || '').trim(); return /任務提交成功|已成功建立\s*\d+\s*個任務/.test(t) && t.length < 100 && e.children.length < 5; });
+            seenText = els[0] ? (els[0].textContent || '').trim().slice(0, 60) : '<found via body text>';
+            break;
+          }
+          await new Promise(r => setTimeout(r, 500));
+        }
+        log('P4.2.5.toast-wait', seen ? 'OK' : 'WARN', seen ? `success toast at +${seenAt}ms · '${seenText}'` : `NO success toast in 20s`);
+        window.__omniSubmitToastSeen = seen;
+        return { ok: seen };
+      })()
+
+  - wait: 3
+
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__omniLog.push({ phase: p, status: s, detail: d });
+        let balanceText = 'UNKNOWN';
+        const creditsBtn = document.querySelector('button[aria-label="Credits"]');
+        if (creditsBtn) { const raw = (creditsBtn.innerText || '').trim(); if (/^\d{1,5}(?:\.\d+)?$/.test(raw)) balanceText = raw + ' Ultra'; }
+        log('P4.3', 'OK', `balance_after='${balanceText}' output=${window.__omniOutputName} cost=${window.__omniCost}cr dry_run=${window.__omniDryRun}`);
+        return { ok: true };
+      })()
+
+  # FINAL · dump __omniLog
+  - evaluate: |
+      (window.__omniLog || [{ phase: 'NONE', status: 'EMPTY', detail: 'log array missing' }])
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}

@@ -1,0 +1,140 @@
+# S363 · video-ref-recon2 · resolve @Video1 KEYBOARD binding (nav key + data-tag) · 0 cr · NO 生成
+# Upload [image, video] once, then 3 keyboard bind attempts (capture data-attr after each):
+#   A. @ + Enter           → expect @Image1 (confirms first-item default)
+#   B. @ + ArrowDown + Enter → does Down reach @Video1?
+#   C. @ + ArrowRight + Enter → does Right reach @Video1? (dropdown is horizontal)
+# License: Apache-2.0
+site: topview
+name: video-ref-recon2
+description: Resolve @Video1 keyboard bind (ArrowDown vs ArrowRight) + capture data-tag · 0 cr · NO submit
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 240
+
+args:
+  file_image: { type: string, required: true, description: still image → @Image1 }
+  file_video: { type: string, required: true, description: mp4 clip → @Video1 }
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # P1 · open panel
+  - evaluate: |
+      (async () => {
+        window.__vrLog = [];
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const mkClick = async (el) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          ['pointerover','pointerenter'].forEach(t => el.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          ['mouseover','mouseenter'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          if (typeof el.click === 'function') el.click();
+        };
+        window.__vrClick = mkClick;
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1','FAIL','VIDEO_BTN_NOT_FOUND'); return {ok:false}; }
+        await mkClick(videoBtn); await new Promise(r => setTimeout(r, 5500)); log('P1.1','OK','影片 panel');
+        const sb = Array.from(document.querySelectorAll('button')).find(b => (b.innerText||'').includes('全參考'));
+        if (!sb) { log('P1.2','FAIL','SEEDANCE_BTN_NOT_FOUND'); return {ok:false}; }
+        await mkClick(sb); await new Promise(r => setTimeout(r, 3000)); log('P1.2','OK','SEEDANCE2 panel');
+        return {ok:true};
+      })()
+
+  # P2 · upload [image, video]
+  - evaluate: |
+      (() => {
+        const fi = document.querySelector('input[type=file]');
+        if (fi) { window.__vrOrig = fi.click.bind(fi); fi.click = function(){ queueMicrotask(()=>{ try{ fi.dispatchEvent(new Event('cancel',{bubbles:true,cancelable:true})); }catch(e){} }); }; }
+        return {ok:true};
+      })()
+  - upload-file-trusted:
+      selector: 'button.border-dashed:has(svg.lucide-upload)'
+      input_selector: 'input[type=file]'
+      files:
+        - "${{ args.file_image }}"
+        - "${{ args.file_video }}"
+  - wait: 12
+  - evaluate: |
+      (() => {
+        const log = (p,s,d) => window.__vrLog.push({phase:p,status:s,detail:d});
+        const fi = document.querySelector('input[type=file]');
+        if (fi && window.__vrOrig) fi.click = window.__vrOrig;
+        const labels = Array.from(document.querySelectorAll('span.text-cyan-400')).map(s=>s.textContent);
+        log('P2.labels','INFO',JSON.stringify(labels));
+        // helper: clear editable + dump bound mentions w/ all data-attrs
+        window.__vrDumpBound = (tag) => {
+          const ed = document.querySelector('[contenteditable=true],[contenteditable]');
+          const out = [];
+          if (ed) {
+            const mentions = Array.from(ed.querySelectorAll('*')).filter(el => Array.from(el.attributes||[]).some(a => /tag$/i.test(a.name) || /^data-/i.test(a.name)));
+            mentions.forEach(m => out.push(Array.from(m.attributes).map(a=>`${a.name}=${a.value}`).join('|') + ' ::text=' + (m.textContent||'').trim().slice(0,16)));
+          }
+          log(tag+'.bound','INFO', `innerText='${ed?(ed.innerText||'').slice(0,40):'NONE'}' mentions=${out.length} ${JSON.stringify(out)}`);
+        };
+        window.__vrClear = () => {
+          const ed = document.querySelector('[contenteditable=true],[contenteditable]');
+          if (!ed) return;
+          ed.focus();
+          const sel = window.getSelection(); sel.removeAllRanges();
+          const range = document.createRange(); range.selectNodeContents(ed); sel.addRange(range);
+          document.execCommand('delete', false);
+        };
+        return {ok:true};
+      })()
+
+  # ── Attempt A: @ + Enter (no arrow) ──
+  - evaluate: |
+      (async()=>{ const ed=document.querySelector('[contenteditable=true],[contenteditable]'); ed.focus(); const r=document.createRange(); r.selectNodeContents(ed); r.collapse(false); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); return {ok:true}; })()
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyDown, key: "@", code: Digit2, modifiers: 8, text: "@", windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: "@", code: Digit2, modifiers: 8, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 } }
+  - wait: 1
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: rawKeyDown, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } }
+  - wait: 1
+  - evaluate: "(()=>{ window.__vrDumpBound('A_at_enter'); window.__vrClear(); return {ok:true}; })()"
+  - wait: 1
+
+  # ── Attempt B: @ + ArrowDown + Enter ──
+  - evaluate: |
+      (async()=>{ const ed=document.querySelector('[contenteditable=true],[contenteditable]'); ed.focus(); const r=document.createRange(); r.selectNodeContents(ed); r.collapse(false); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); return {ok:true}; })()
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyDown, key: "@", code: Digit2, modifiers: 8, text: "@", windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: "@", code: Digit2, modifiers: 8, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 } }
+  - wait: 1
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: rawKeyDown, key: ArrowDown, code: ArrowDown, windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: ArrowDown, code: ArrowDown, windowsVirtualKeyCode: 40, nativeVirtualKeyCode: 40 } }
+  - wait: 1
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: rawKeyDown, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } }
+  - wait: 1
+  - evaluate: "(()=>{ window.__vrDumpBound('B_at_down_enter'); window.__vrClear(); return {ok:true}; })()"
+  - wait: 1
+
+  # ── Attempt C: @ + ArrowRight + Enter ──
+  - evaluate: |
+      (async()=>{ const ed=document.querySelector('[contenteditable=true],[contenteditable]'); ed.focus(); const r=document.createRange(); r.selectNodeContents(ed); r.collapse(false); const s=window.getSelection(); s.removeAllRanges(); s.addRange(r); return {ok:true}; })()
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyDown, key: "@", code: Digit2, modifiers: 8, text: "@", windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: "@", code: Digit2, modifiers: 8, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 } }
+  - wait: 1
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: rawKeyDown, key: ArrowRight, code: ArrowRight, windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: ArrowRight, code: ArrowRight, windowsVirtualKeyCode: 39, nativeVirtualKeyCode: 39 } }
+  - wait: 1
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: rawKeyDown, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } }
+  - cdp: { method: Input.dispatchKeyEvent, params: { type: keyUp, key: Enter, code: Enter, windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 } }
+  - wait: 1
+  - evaluate: "(()=>{ window.__vrDumpBound('C_at_right_enter'); return {ok:true}; })()"
+
+  - cdp: { method: Page.captureScreenshot, params: { format: png, quality: 80 } }
+    saveTo: screenshot
+  - evaluate: "(()=>{ window.__vrLog.push({phase:'END',status:'DONE',detail:'recon2 complete'}); return window.__vrLog; })()"
+  - map: { phase: "${{ item.phase }}", status: "${{ item.status }}", detail: "${{ item.detail }}" }

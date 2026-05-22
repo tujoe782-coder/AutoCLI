@@ -1,0 +1,249 @@
+# S363 · video-ref-recon · Topview Omni @Video1 chip-binding RECON (0 cr · NO 生成)
+# WHY: submit-omni-*-direct chip-binding is hard-wired to @Image1/@Image2/@Image3.
+#      Topview Omni natively accepts video (.mp4/.mov) → becomes @Video1 chip (motion ref).
+#      Before forking a submit adapter we must learn 4 unknowns by uploading a REAL
+#      [image, video] pair and inspecting the live DOM:
+#        U1. chip labels after upload (span.text-cyan-400 text) — is video '@Video1'?
+#        U2. video chip thumbnail element — <img src=blob:> (like image) OR <video>? (affects P2.verify)
+#        U3. @ mention dropdown item ORDER (determines ArrowDown count to reach @Video1)
+#        U4. bound mention data attribute — 'data-image-tag="@Video1"' OR 'data-video-tag'?
+# READ-ONLY w.r.t. credits: uploads files + types @ + dumps DOM · NEVER clicks 生成 · 0 cr.
+# License: Apache-2.0
+
+site: topview
+name: video-ref-recon
+description: Recon Topview Omni @Video1 chip-binding (upload image+video · dump chip labels/dropdown/data-tag) · 0 cr · NO submit
+domain: www.topview.ai
+strategy: cookie
+browser: true
+timeoutSeconds: 240
+
+args:
+  file_image:
+    type: string
+    required: true
+    description: Absolute path to a still image (storyboard PNG) → expect @Image1
+  file_video:
+    type: string
+    required: true
+    description: Absolute path to an mp4 clip (≤15s) → expect @Video1
+
+columns: [phase, status, detail]
+
+pipeline:
+  - navigate: https://www.topview.ai/board/4cc8183920c849cca4a871c58651e1b3
+  - wait: 5
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P1 · open 影片 → 全參考 SEEDANCE2 panel  (verbatim from submit-omni-3chip-direct P1)
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (async () => {
+        window.__vrLog = [];
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const mkClick = async (el) => {
+          if (!el) return;
+          const r = el.getBoundingClientRect();
+          const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+          ['pointerover','pointerenter'].forEach(t => el.dispatchEvent(new PointerEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          ['mouseover','mouseenter'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
+          await new Promise(r => setTimeout(r, 200));
+          el.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mousedown', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy }));
+          el.dispatchEvent(new MouseEvent('mouseup', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          el.dispatchEvent(new MouseEvent('click', { bubbles:true, cancelable:true, clientX:cx, clientY:cy, button:0 }));
+          if (typeof el.click === 'function') el.click();
+        };
+        window.__vrClick = mkClick;
+        const videoBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').trim() === '影片');
+        if (!videoBtn) { log('P1.1', 'FAIL', 'VIDEO_BTN_NOT_FOUND (Chrome may not be logged into Topview)'); return { ok:false }; }
+        await mkClick(videoBtn);
+        await new Promise(r => setTimeout(r, 5500));
+        log('P1.1', 'OK', '影片 panel opened');
+        const seedanceBtn = Array.from(document.querySelectorAll('button')).find(b => (b.innerText || '').includes('全參考'));
+        if (!seedanceBtn) { log('P1.2', 'FAIL', 'SEEDANCE_BTN_NOT_FOUND'); return { ok:false }; }
+        await mkClick(seedanceBtn);
+        await new Promise(r => setTimeout(r, 3000));
+        log('P1.2', 'OK', 'SEEDANCE2 panel opened');
+        return { ok: true };
+      })()
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P2 · upload [image, video] via trusted CDP setFileInputFiles (block native picker)
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        if (!fi) { log('P2.pre', 'WARN', 'no input[type=file]'); return { ok: false }; }
+        log('P2.pre', 'INFO', `input accept='${fi.accept||''}' multiple=${fi.multiple}`);
+        window.__vrInputClickOrig = fi.click.bind(fi);
+        fi.click = function() { queueMicrotask(() => { try { fi.dispatchEvent(new Event('cancel', { bubbles: true, cancelable: true })); } catch (e) {} }); };
+        return { ok: true };
+      })()
+
+  - upload-file-trusted:
+      selector: 'button.border-dashed:has(svg.lucide-upload)'
+      input_selector: 'input[type=file]'
+      files:
+        - "${{ args.file_image }}"
+        - "${{ args.file_video }}"
+
+  # video transcode/thumbnail may take longer than image — give it generous time
+  - wait: 12
+
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        if (fi && window.__vrInputClickOrig) { fi.click = window.__vrInputClickOrig; }
+        return { ok: true };
+      })()
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P2.verify · U1 (chip labels) + U2 (thumbnail element type) — dump every chip
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const fi = document.querySelector('input[type=file]');
+        const parent = fi && fi.parentElement;
+        if (!parent) { log('P2.verify', 'FAIL', 'no input parent'); return { ok:false }; }
+        // dump ALL direct-child DIV chips (don't pre-filter on img blob — video may differ)
+        const chipDivs = Array.from(parent.children).filter(el => el.tagName === 'DIV');
+        log('P2.chip_count', 'INFO', `parent DIV children: ${chipDivs.length}`);
+        chipDivs.forEach((d, i) => {
+          const labelSpan = d.querySelector('span.text-cyan-400');
+          const label = labelSpan ? labelSpan.textContent : '<none>';
+          const img = d.querySelector('img');
+          const vid = d.querySelector('video');
+          const imgSrc = img ? (img.src || '').slice(0, 32) : '<no img>';
+          const vidSrc = vid ? (vid.src || vid.currentSrc || '').slice(0, 32) : '<no video>';
+          const r = d.getBoundingClientRect();
+          log(`P2.chip.${i}`, 'INFO',
+            `label='${label}' img=${!!img}(${imgSrc}) video=${!!vid}(${vidSrc}) ` +
+            `rect=(${Math.round(r.left)},${Math.round(r.top)} ${Math.round(r.width)}x${Math.round(r.height)})`);
+        });
+        // also list ALL cyan labels anywhere in panel (in case chip DOM differs for video)
+        const allLabels = Array.from(document.querySelectorAll('span.text-cyan-400')).map(s => s.textContent);
+        log('P2.all_cyan_labels', 'INFO', JSON.stringify(allLabels));
+        window.__vrChipCount = chipDivs.length;
+        return { ok: true };
+      })()
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P3 · focus contenteditable · type prose + '@' · DUMP dropdown (U3 order) — DO NOT select yet
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.0', 'FAIL', 'NO_CONTENTEDITABLE'); return { ok:false }; }
+        editable.focus();
+        const range = document.createRange(); range.selectNodeContents(editable); range.collapse(false);
+        const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+        document.execCommand('insertText', false, 'RECON ');
+        await new Promise(r => setTimeout(r, 500));
+        log('P3.0', 'OK', `editable focused, seeded prose`);
+        return { ok: true };
+      })()
+
+  # type '@' via CDP (trusted) to open mention dropdown
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyDown, key: "@", code: Digit2, modifiers: 8, text: "@", windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 }
+  - cdp:
+      method: Input.dispatchKeyEvent
+      params: { type: keyUp, key: "@", code: Digit2, modifiers: 8, windowsVirtualKeyCode: 50, nativeVirtualKeyCode: 50 }
+  - wait: 2
+
+  # DUMP dropdown items in DOM order (U3)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        // Find all visible elements whose trimmed text is exactly an @Image/@Video token
+        const all = Array.from(document.querySelectorAll('*'));
+        const items = [];
+        for (const el of all) {
+          if (el.children.length > 0) continue;
+          const t = (el.innerText || el.textContent || '').trim();
+          if (/^@(Image|Video)\d+$/.test(t)) {
+            const r = el.getBoundingClientRect();
+            if (r.width < 2 || r.height < 2) continue;
+            items.push({ t, top: Math.round(r.top), left: Math.round(r.left) });
+          }
+        }
+        // sort by visual order (top then left) to infer dropdown order
+        items.sort((a,b) => a.top - b.top || a.left - b.left);
+        log('P3.dropdown_order', 'INFO', JSON.stringify(items));
+        window.__vrDropdown = items.map(i => i.t);
+        // compute ArrowDown count to reach @Video1 (0-based from first item)
+        const vIdx = window.__vrDropdown.indexOf('@Video1');
+        log('P3.video1_index', vIdx >= 0 ? 'OK' : 'WARN',
+          `@Video1 at index ${vIdx} of [${window.__vrDropdown.join(', ')}] · ArrowDown×${vIdx} then Enter`);
+        return { ok: true };
+      })()
+
+  # select @Video1 by clicking its dropdown item directly (robust for recon)
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const all = Array.from(document.querySelectorAll('*'));
+        let target = null;
+        for (const el of all) {
+          if (el.children.length > 0) continue;
+          const t = (el.innerText || el.textContent || '').trim();
+          if (t === '@Video1') {
+            const r = el.getBoundingClientRect();
+            if (r.width > 2 && r.height > 2) { target = el; break; }
+          }
+        }
+        if (!target) { log('P3.select', 'WARN', '@Video1 dropdown item not found to click'); return { ok:false }; }
+        const clickEl = target.closest('[role=option],li,button,div') || target;
+        await window.__vrClick(clickEl);
+        await new Promise(r => setTimeout(r, 1200));
+        log('P3.select', 'OK', 'clicked @Video1 dropdown item');
+        return { ok: true };
+      })()
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # P3.9 · U4 — dump data-* attributes of bound mentions in the contenteditable
+  # ───────────────────────────────────────────────────────────────────────────
+  - evaluate: |
+      (async () => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        const editable = document.querySelector('[contenteditable=true], [contenteditable]');
+        if (!editable) { log('P3.9', 'FAIL', 'NO_CONTENTEDITABLE'); return { ok:false }; }
+        log('P3.9.innerText', 'INFO', `'${(editable.innerText||'').slice(0,120)}'`);
+        // any element under editable carrying a data-*tag attr
+        const mentions = Array.from(editable.querySelectorAll('*')).filter(el =>
+          Array.from(el.attributes || []).some(a => /^data-.*tag$/i.test(a.name) || /tag$/i.test(a.name)));
+        log('P3.9.mention_count', 'INFO', `tag-bearing elements: ${mentions.length}`);
+        mentions.slice(0, 8).forEach((m, i) => {
+          const attrs = Array.from(m.attributes).map(a => `${a.name}="${a.value}"`).join(' ');
+          log(`P3.9.mention.${i}`, 'INFO', `<${m.tagName.toLowerCase()} ${attrs}> text='${(m.textContent||'').trim().slice(0,20)}'`);
+        });
+        // also dump known data-image-tag (current verify path) for comparison
+        const imgTags = Array.from(editable.querySelectorAll('[data-image-tag]')).map(m => m.getAttribute('data-image-tag'));
+        log('P3.9.data_image_tag', 'INFO', JSON.stringify(imgTags));
+        return { ok: true };
+      })()
+
+  # screenshot for visual confirmation
+  - cdp:
+      method: Page.captureScreenshot
+      params: { format: png, quality: 80 }
+    saveTo: screenshot
+
+  - evaluate: |
+      (() => {
+        const log = (p, s, d) => window.__vrLog.push({ phase: p, status: s, detail: d });
+        log('END', 'DONE', `chips=${window.__vrChipCount} dropdown=[${(window.__vrDropdown||[]).join(',')}]`);
+        return window.__vrLog;
+      })()
+
+  - map:
+      phase: ${{ item.phase }}
+      status: ${{ item.status }}
+      detail: ${{ item.detail }}
