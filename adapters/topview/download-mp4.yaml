@@ -195,29 +195,39 @@ pipeline:
         ['mouseover','mouseenter'].forEach(t => card.dispatchEvent(new MouseEvent(t, { bubbles:true, cancelable:true, clientX:cx, clientY:cy })));
         await new Promise(r => setTimeout(r, 400));
 
-        // Click download button via mkPointerSeq (S320 chooser-bind pattern · trusted by Topview React)
+        // S366 fix (gh#58): store download button CENTER for a CDP TRUSTED click below.
+        // Synthetic .click()/dispatchEvent have isTrusted=false → React onClick fires but Chrome
+        // BLOCKS the actual file download (downloads require a trusted user gesture). The real fix
+        // is a CDP Input.dispatchMouseEvent click (trusted) — same lesson as grok ProseMirror CDP input.
         const r = dlBtn.getBoundingClientRect();
         const bx = r.left + r.width / 2, by = r.top + r.height / 2;
-        const mk = (t) => new MouseEvent(t, { bubbles:true, cancelable:true, view:window, clientX:bx, clientY:by, button:0 });
-        dlBtn.dispatchEvent(new PointerEvent('pointerover', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
-        dlBtn.dispatchEvent(new PointerEvent('pointerenter', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
-        dlBtn.dispatchEvent(mk('mouseover'));
-        dlBtn.dispatchEvent(mk('mouseenter'));
-        await new Promise(r => setTimeout(r, 200));
-        dlBtn.dispatchEvent(new PointerEvent('pointerdown', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
-        dlBtn.dispatchEvent(mk('mousedown'));
-        dlBtn.dispatchEvent(new PointerEvent('pointerup', { bubbles:true, cancelable:true, clientX:bx, clientY:by }));
-        dlBtn.dispatchEvent(mk('mouseup'));
-        dlBtn.dispatchEvent(mk('click'));
-        if (typeof dlBtn.click === 'function') dlBtn.click();
-
-        const clickedAtMs = Date.now();
-        window.__dlClickedAtMs = clickedAtMs;
-        await new Promise(r => setTimeout(r, 2000));
-        log('P2.2', 'OK', `click dispatched at (${Math.round(bx)},${Math.round(by)}) · clicked_at_ms=${clickedAtMs}`);
-
-        return { ok: true, customName: window.__dlCustomName, clicked_at_ms: clickedAtMs };
+        window.__dlBx = Math.round(bx); window.__dlBy = Math.round(by);
+        window.__dlClickedAtMs = Date.now();
+        log('P2.1b', 'OK', `download btn center=(${window.__dlBx},${window.__dlBy}) · CDP-trusted click next`);
+        return { ok: true, x: window.__dlBx, y: window.__dlBy, customName: window.__dlCustomName };
       })()
+
+  # P2.2 · CDP TRUSTED mouse click at download-button center (S366 gh#58 fix · trusted gesture → Chrome saves file)
+  #        mouseMoved first also triggers the real :hover that un-hides the opacity:0 download icon.
+  - evaluate: |
+      ({ x: window.__dlBx || 0, y: window.__dlBy || 0 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseMoved, x: "${{ data.x }}", y: "${{ data.y }}", button: none, buttons: 0, clickCount: 0 }
+  - wait: 1
+  - evaluate: |
+      ({ x: window.__dlBx || 0, y: window.__dlBy || 0 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mousePressed, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 1, clickCount: 1 }
+  - evaluate: |
+      ({ x: window.__dlBx || 0, y: window.__dlBy || 0 })
+  - cdp:
+      method: Input.dispatchMouseEvent
+      params: { type: mouseReleased, x: "${{ data.x }}", y: "${{ data.y }}", button: left, buttons: 0, clickCount: 1 }
+  - wait: 3
+  - evaluate: |
+      (() => { window.__dlLog.push({ phase: 'P2.2', status: 'OK', detail: `CDP trusted click at (${window.__dlBx},${window.__dlBy}) · clicked_at_ms=${window.__dlClickedAtMs}` }); return { ok: true, customName: window.__dlCustomName, clicked_at_ms: window.__dlClickedAtMs }; })()
 
   - wait: 3
 
